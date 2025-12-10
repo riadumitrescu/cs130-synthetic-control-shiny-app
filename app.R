@@ -19,7 +19,39 @@ source("functions/plotting_functions.R")
 
 # Define UI
 ui <- dashboardPage(
-  dashboardHeader(title = "Synthetic Control Analysis"),
+  dashboardHeader(
+    title = "Synthetic Control Analysis",
+    tags$li(
+      class = "dropdown",
+      style = "padding: 8px 15px;",
+      actionButton("saveParamsBtn", 
+                   "💾 Save Parameters", 
+                   class = "btn-success",
+                   style = "color: white; font-weight: bold; padding: 8px 16px; font-size: 14px;",
+                   icon = icon("save")),
+      tags$script(HTML("
+        $(document).ready(function() {
+          $('#saveParamsBtn').css({
+            'background-color': '#28a745',
+            'border-color': '#28a745',
+            'margin-top': '8px',
+            'box-shadow': '0 2px 4px rgba(0,0,0,0.2)'
+          }).hover(function() {
+            $(this).css('background-color', '#218838');
+          }, function() {
+            $(this).css('background-color', '#28a745');
+          }).click(function() {
+            var btn = $(this);
+            var originalText = btn.html();
+            btn.html('<i class=\"fa fa-spinner fa-spin\"></i> Saving...').prop('disabled', true);
+            setTimeout(function() {
+              btn.html(originalText).prop('disabled', false);
+            }, 1000);
+          });
+        });
+      "))
+    )
+  ),
 
   dashboardSidebar(
     sidebarMenu(
@@ -47,6 +79,249 @@ ui <- dashboardPage(
         .skin-blue .main-sidebar {
           background-color: #34495e;
         }
+        .settings-restored {
+          background-color: #d4edda;
+          border: 1px solid #c3e6cb;
+          color: #155724;
+          padding: 10px;
+          border-radius: 5px;
+          margin: 10px 0;
+        }
+      ")),
+      tags$script(HTML("
+        // IndexedDB Storage Manager for Synthetic Control App Settings
+        (function() {
+          const DB_NAME = 'SyntheticControlDB';
+          const DB_VERSION = 1;
+          const STORE_NAME = 'settings';
+          let db = null;
+          
+          // Initialize IndexedDB
+          function initDB() {
+            return new Promise((resolve, reject) => {
+              if (db) {
+                resolve(db);
+                return;
+              }
+              
+              const request = indexedDB.open(DB_NAME, DB_VERSION);
+              
+              request.onerror = function() {
+                console.error('IndexedDB error:', request.error);
+                reject(request.error);
+              };
+              
+              request.onsuccess = function() {
+                db = request.result;
+                console.log('IndexedDB opened successfully');
+                resolve(db);
+              };
+              
+              request.onupgradeneeded = function(event) {
+                const db = event.target.result;
+                if (!db.objectStoreNames.contains(STORE_NAME)) {
+                  const objectStore = db.createObjectStore(STORE_NAME, { keyPath: 'fileName' });
+                  objectStore.createIndex('savedAt', 'savedAt', { unique: false });
+                  console.log('IndexedDB store created');
+                }
+              };
+            });
+          }
+          
+          // Save settings to IndexedDB
+          window.saveSettings = function(fileName, settings) {
+            initDB().then(function(db) {
+              const transaction = db.transaction([STORE_NAME], 'readwrite');
+              const store = transaction.objectStore(STORE_NAME);
+              
+              const data = {
+                fileName: fileName,
+                settings: settings,
+                savedAt: new Date().toISOString()
+              };
+              
+              const request = store.put(data);
+              
+              request.onsuccess = function() {
+                console.log('Settings saved successfully for:', fileName);
+                console.log('Saved data:', data);
+              };
+              
+              request.onerror = function() {
+                console.error('Error saving settings:', request.error);
+              };
+            }).catch(function(error) {
+              console.error('Failed to initialize DB:', error);
+              // Fallback to localStorage
+              try {
+                const STORAGE_KEY = 'synthetic_control_settings';
+                let allSettings = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+                allSettings[fileName] = {
+                  ...settings,
+                  savedAt: new Date().toISOString()
+                };
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(allSettings));
+                console.log('Settings saved to localStorage (fallback) for:', fileName);
+              } catch(e) {
+                console.error('Error saving to localStorage:', e);
+              }
+            });
+          };
+          
+          // Load settings from IndexedDB
+          window.loadSettings = function(fileName) {
+            return new Promise((resolve) => {
+              initDB().then(function(db) {
+                const transaction = db.transaction([STORE_NAME], 'readonly');
+                const store = transaction.objectStore(STORE_NAME);
+                const request = store.get(fileName);
+                
+                request.onsuccess = function() {
+                  if (request.result) {
+                    console.log('Settings loaded from IndexedDB for:', fileName);
+                    console.log('Loaded data:', request.result);
+                    resolve(request.result.settings);
+                  } else {
+                    console.log('No settings found in IndexedDB for:', fileName);
+                    // Try localStorage fallback
+                    try {
+                      const STORAGE_KEY = 'synthetic_control_settings';
+                      const allSettings = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+                      if (allSettings[fileName]) {
+                        console.log('Settings loaded from localStorage (fallback) for:', fileName);
+                        resolve(allSettings[fileName]);
+                      } else {
+                        resolve(null);
+                      }
+                    } catch(e) {
+                      console.error('Error loading from localStorage:', e);
+                      resolve(null);
+                    }
+                  }
+                };
+                
+                request.onerror = function() {
+                  console.error('Error loading settings:', request.error);
+                  resolve(null);
+                };
+              }).catch(function(error) {
+                console.error('Failed to load from IndexedDB:', error);
+                // Fallback to localStorage
+                try {
+                  const STORAGE_KEY = 'synthetic_control_settings';
+                  const allSettings = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+                  if (allSettings[fileName]) {
+                    console.log('Settings loaded from localStorage (fallback) for:', fileName);
+                    resolve(allSettings[fileName]);
+                  } else {
+                    resolve(null);
+                  }
+                } catch(e) {
+                  console.error('Error loading from localStorage:', e);
+                  resolve(null);
+                }
+              });
+            });
+          };
+          
+          // Get all saved file names
+          window.getSavedFileNames = function() {
+            return new Promise((resolve) => {
+              initDB().then(function(db) {
+                const transaction = db.transaction([STORE_NAME], 'readonly');
+                const store = transaction.objectStore(STORE_NAME);
+                const request = store.getAll();
+                
+                request.onsuccess = function() {
+                  const fileNames = request.result.map(item => item.fileName);
+                  console.log('Saved file names:', fileNames);
+                  resolve(fileNames);
+                };
+                
+                request.onerror = function() {
+                  console.error('Error getting file names:', request.error);
+                  resolve([]);
+                };
+              }).catch(function(error) {
+                console.error('Failed to get file names:', error);
+                // Fallback to localStorage
+                try {
+                  const STORAGE_KEY = 'synthetic_control_settings';
+                  const allSettings = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+                  resolve(Object.keys(allSettings));
+                } catch(e) {
+                  console.error('Error getting file names from localStorage:', e);
+                  resolve([]);
+                }
+              });
+            });
+          };
+          
+          // Clear settings for a specific file
+          window.clearSettings = function(fileName) {
+            initDB().then(function(db) {
+              const transaction = db.transaction([STORE_NAME], 'readwrite');
+              const store = transaction.objectStore(STORE_NAME);
+              const request = store.delete(fileName);
+              
+              request.onsuccess = function() {
+                console.log('Settings cleared for:', fileName);
+              };
+              
+              request.onerror = function() {
+                console.error('Error clearing settings:', request.error);
+              };
+            }).catch(function(error) {
+              console.error('Failed to clear settings:', error);
+            });
+          };
+          
+          // Listen for Shiny messages to save settings
+          Shiny.addCustomMessageHandler('saveSettings', function(message) {
+            if (message.fileName && message.settings) {
+              console.log('Received saveSettings message for:', message.fileName);
+              saveSettings(message.fileName, message.settings);
+            }
+          });
+          
+          // Listen for Shiny messages to load settings
+          Shiny.addCustomMessageHandler('loadSettings', function(message) {
+            if (message.fileName) {
+              console.log('Received loadSettings message for:', message.fileName);
+              loadSettings(message.fileName).then(function(settings) {
+                if (settings) {
+                  console.log('Sending restored settings to Shiny');
+                  Shiny.setInputValue('restored_settings', settings, {priority: 'event'});
+                } else {
+                  console.log('No settings found to restore');
+                }
+              });
+            }
+          });
+          
+          // Auto-save settings when inputs change (debounced)
+          let saveTimeout;
+          $(document).on('change', '#unitVar, #timeVar, #outcomeVar, #treatedUnit, #treatmentYear, input[name=\"predictorVars\"]', function() {
+            clearTimeout(saveTimeout);
+            saveTimeout = setTimeout(function() {
+              console.log('Auto-save triggered by input change');
+              Shiny.setInputValue('auto_save_trigger', Math.random(), {priority: 'event'});
+            }, 1000); // Wait 1 second after last change
+          });
+          
+          // Listen for trigger to auto-save
+          Shiny.addCustomMessageHandler('triggerAutoSave', function(message) {
+            console.log('Auto-save triggered by message');
+            Shiny.setInputValue('auto_save_trigger', Math.random(), {priority: 'event'});
+          });
+          
+          // Initialize DB on page load
+          initDB().then(function() {
+            console.log('IndexedDB initialized and ready');
+          }).catch(function(error) {
+            console.error('Failed to initialize IndexedDB:', error);
+          });
+        })();
       "))
     ),
 
@@ -84,6 +359,18 @@ ui <- dashboardPage(
       tabItem(tabName = "config",
         conditionalPanel(
           condition = "output.fileUploaded",
+          conditionalPanel(
+            condition = "output.settingsRestored",
+            fluidRow(
+              box(
+                width = 12,
+                div(class = "settings-restored",
+                    icon("check-circle"), 
+                    strong(" Settings Restored!"), 
+                    " Your previous configuration for this file has been automatically loaded.")
+              )
+            )
+          ),
           fluidRow(
             # Variable Mapping
             box(
@@ -393,12 +680,69 @@ server <- function(input, output, session) {
     placebo_results = NULL,
     placebo_completed = FALSE,
     special_predictors = list(),  # List of special predictor configs
-    predictor_count = 0           # Counter for predictor IDs
+    predictor_count = 0,          # Counter for predictor IDs
+    current_file_name = NULL,     # Current uploaded file name for localStorage
+    settings_restored = FALSE,    # Flag to track if settings were restored
+    pending_settings = NULL       # Settings waiting to be restored
   )
+
+  # Helper function to save current settings
+  saveCurrentSettings <- function() {
+    if(is.null(values$current_file_name) || is.null(values$data)) {
+      showNotification("Please upload a file first!", type = "warning", duration = 3)
+      return(FALSE)
+    }
+    
+    if(is.null(input$unitVar) || is.null(input$timeVar) || is.null(input$outcomeVar)) {
+      showNotification("Please configure at least Unit, Time, and Outcome variables!", type = "warning", duration = 3)
+      return(FALSE)
+    }
+    
+    settings_to_save <- list(
+      unitVar = input$unitVar,
+      timeVar = input$timeVar,
+      outcomeVar = input$outcomeVar,
+      treatedUnit = input$treatedUnit,
+      treatmentYear = input$treatmentYear,
+      predictorVars = input$predictorVars,
+      special_predictors = values$special_predictors
+    )
+    
+    cat("Manual save triggered for file:", values$current_file_name, "\n")
+    cat("Settings being saved:", paste(names(settings_to_save), collapse=", "), "\n")
+    
+    session$sendCustomMessage("saveSettings", list(
+      fileName = values$current_file_name,
+      settings = settings_to_save
+    ))
+    
+    return(TRUE)
+  }
+  
+  # Manual save button handler
+  observeEvent(input$saveParamsBtn, {
+    if(saveCurrentSettings()) {
+      showNotification(
+        HTML(paste0(
+          icon("check-circle"), 
+          " Parameters saved successfully for: <strong>", 
+          values$current_file_name, 
+          "</strong>"
+        )), 
+        type = "success", 
+        duration = 4
+      )
+    }
+  })
 
   # File upload handling
   observeEvent(input$file, {
     req(input$file)
+
+    # Store file name for IndexedDB (use exact file name as key)
+    values$current_file_name <- input$file$name
+    values$settings_restored <- FALSE
+    values$pending_settings <- NULL
 
     # Read the uploaded file
     ext <- tools::file_ext(input$file$datapath)
@@ -421,7 +765,213 @@ server <- function(input, output, session) {
     # Reset special predictors when new data is uploaded
     values$special_predictors <- list()
     values$predictor_count <- 0
+    
+    # Try to restore saved settings for this file (use exact file name)
+    cat("Attempting to load settings for file:", input$file$name, "\n")
+    session$sendCustomMessage("loadSettings", list(fileName = input$file$name))
   })
+  
+  # Handle restored settings from IndexedDB
+  observeEvent(input$restored_settings, {
+    req(input$restored_settings, values$data)
+    settings <- input$restored_settings
+    values$pending_settings <- settings
+    
+    # Restore variable mappings if they exist in current data
+    if(!is.null(settings$unitVar) && settings$unitVar %in% names(values$data)) {
+      updateSelectInput(session, "unitVar", selected = settings$unitVar)
+    }
+    if(!is.null(settings$timeVar) && settings$timeVar %in% names(values$data)) {
+      updateSelectInput(session, "timeVar", selected = settings$timeVar)
+    }
+    if(!is.null(settings$outcomeVar) && settings$outcomeVar %in% names(values$data)) {
+      updateSelectInput(session, "outcomeVar", selected = settings$outcomeVar)
+    }
+    
+    # Restore predictor variables
+    if(!is.null(settings$predictorVars) && length(settings$predictorVars) > 0) {
+      valid_predictors <- intersect(settings$predictorVars, names(values$data))
+      if(length(valid_predictors) > 0) {
+        updateCheckboxGroupInput(session, "predictorVars", selected = valid_predictors)
+      }
+    }
+  })
+  
+  # Restore treatment year after timeVar is set
+  observeEvent(input$timeVar, {
+    if(!is.null(values$pending_settings) && !is.null(values$pending_settings$treatmentYear)) {
+      settings <- values$pending_settings
+      if(!is.null(input$timeVar) && input$timeVar %in% names(values$data)) {
+        years <- sort(unique(values$data[[input$timeVar]]))
+        if(settings$treatmentYear >= min(years) && settings$treatmentYear <= max(years)) {
+          updateNumericInput(session, "treatmentYear", value = settings$treatmentYear)
+        }
+        # If no special predictors to restore, mark as restored now
+        if(is.null(settings$special_predictors) || length(settings$special_predictors) == 0) {
+          values$pending_settings <- NULL
+          values$settings_restored <- TRUE
+          showNotification("Previous settings restored for this file!", type = "message", duration = 5)
+        }
+      }
+    }
+  }, priority = 1)
+  
+  # Restore treated unit after unitVar is set
+  observeEvent(input$unitVar, {
+    if(!is.null(values$pending_settings) && !is.null(values$pending_settings$treatedUnit)) {
+      settings <- values$pending_settings
+      if(!is.null(input$unitVar) && input$unitVar %in% names(values$data)) {
+        units <- unique(values$data[[input$unitVar]])
+        if(settings$treatedUnit %in% units) {
+          updateSelectInput(session, "treatedUnit", selected = settings$treatedUnit)
+        }
+      }
+    }
+  }, priority = 1)
+  
+  # Restore special predictors after timeVar is set
+  observeEvent(input$timeVar, {
+    if(!is.null(values$pending_settings)) {
+      settings <- values$pending_settings
+      if(!is.null(input$timeVar) && input$timeVar %in% names(values$data)) {
+        # Restore special predictors if they exist
+        if(!is.null(settings$special_predictors) && length(settings$special_predictors) > 0) {
+          valid_predictors <- list()
+          years <- sort(unique(values$data[[input$timeVar]]))
+          for(pred in settings$special_predictors) {
+            if(!is.null(pred$var) && pred$var %in% names(values$data)) {
+              if(!is.null(pred$start) && !is.null(pred$end) && 
+                 pred$start >= min(years) && pred$end <= max(years)) {
+                values$predictor_count <- values$predictor_count + 1
+                valid_predictors <- c(valid_predictors, list(list(
+                  id = values$predictor_count,
+                  var = pred$var,
+                  start = pred$start,
+                  end = pred$end,
+                  op = if(!is.null(pred$op)) pred$op else "mean"
+                )))
+              }
+            }
+          }
+          if(length(valid_predictors) > 0) {
+            values$special_predictors <- valid_predictors
+          }
+        }
+        # Clear pending settings after restoration
+        values$pending_settings <- NULL
+        values$settings_restored <- TRUE
+        showNotification("Previous settings restored for this file!", type = "message", duration = 5)
+      }
+    }
+  }, priority = 0)
+  
+  # Auto-save settings when they change (triggered by JS debounced events)
+  observeEvent(input$auto_save_trigger, {
+    req(values$current_file_name, values$data)
+    
+    # Only save if we have the minimum required settings
+    # Save even if not restored yet (user might be configuring for first time)
+    if(!is.null(input$unitVar) && !is.null(input$timeVar) && !is.null(input$outcomeVar)) {
+      settings_to_save <- list(
+        unitVar = input$unitVar,
+        timeVar = input$timeVar,
+        outcomeVar = input$outcomeVar,
+        treatedUnit = input$treatedUnit,
+        treatmentYear = input$treatmentYear,
+        predictorVars = input$predictorVars,
+        special_predictors = values$special_predictors
+      )
+      
+      cat("Auto-saving settings for file:", values$current_file_name, "\n")
+      cat("Settings:", paste(names(settings_to_save), collapse=", "), "\n")
+      
+      session$sendCustomMessage("saveSettings", list(
+        fileName = values$current_file_name,
+        settings = settings_to_save
+      ))
+    } else {
+      cat("Cannot save: missing required variables\n")
+    }
+  }, ignoreInit = TRUE)
+  
+  # Also save immediately when key settings are complete (not just on auto-save trigger)
+  observeEvent(c(input$unitVar, input$timeVar, input$outcomeVar, input$treatedUnit, 
+                 input$treatmentYear), {
+    if(!is.null(values$current_file_name) && values$settings_restored && 
+       !is.null(input$unitVar) && !is.null(input$timeVar) && !is.null(input$outcomeVar)) {
+      # Small delay to batch multiple changes
+      invalidateLater(500, session)
+      observe({
+        if(!is.null(input$unitVar) && !is.null(input$timeVar) && !is.null(input$outcomeVar)) {
+          settings_to_save <- list(
+            unitVar = input$unitVar,
+            timeVar = input$timeVar,
+            outcomeVar = input$outcomeVar,
+            treatedUnit = input$treatedUnit,
+            treatmentYear = input$treatmentYear,
+            predictorVars = input$predictorVars,
+            special_predictors = values$special_predictors
+          )
+          
+          cat("Saving settings immediately for file:", values$current_file_name, "\n")
+          session$sendCustomMessage("saveSettings", list(
+            fileName = values$current_file_name,
+            settings = settings_to_save
+          ))
+        }
+      })
+    }
+  }, ignoreInit = TRUE)
+  
+  # Save settings when special predictors change
+  observeEvent(values$special_predictors, {
+    if(!is.null(values$current_file_name) && values$settings_restored && 
+       !is.null(input$unitVar) && !is.null(input$timeVar) && !is.null(input$outcomeVar)) {
+      invalidateLater(500, session)
+      observe({
+        settings_to_save <- list(
+          unitVar = input$unitVar,
+          timeVar = input$timeVar,
+          outcomeVar = input$outcomeVar,
+          treatedUnit = input$treatedUnit,
+          treatmentYear = input$treatmentYear,
+          predictorVars = input$predictorVars,
+          special_predictors = values$special_predictors
+        )
+        
+        cat("Saving settings (special predictors changed) for file:", values$current_file_name, "\n")
+        session$sendCustomMessage("saveSettings", list(
+          fileName = values$current_file_name,
+          settings = settings_to_save
+        ))
+      })
+    }
+  }, ignoreInit = TRUE)
+  
+  # Save settings when predictor vars change
+  observeEvent(input$predictorVars, {
+    if(!is.null(values$current_file_name) && values$settings_restored && 
+       !is.null(input$unitVar) && !is.null(input$timeVar) && !is.null(input$outcomeVar)) {
+      invalidateLater(500, session)
+      observe({
+        settings_to_save <- list(
+          unitVar = input$unitVar,
+          timeVar = input$timeVar,
+          outcomeVar = input$outcomeVar,
+          treatedUnit = input$treatedUnit,
+          treatmentYear = input$treatmentYear,
+          predictorVars = input$predictorVars,
+          special_predictors = values$special_predictors
+        )
+        
+        cat("Saving settings (predictor vars changed) for file:", values$current_file_name, "\n")
+        session$sendCustomMessage("saveSettings", list(
+          fileName = values$current_file_name,
+          settings = settings_to_save
+        ))
+      })
+    }
+  }, ignoreInit = TRUE)
 
   # Update treated unit choices when unit variable is selected
   observeEvent(input$unitVar, {
@@ -481,6 +1031,12 @@ server <- function(input, output, session) {
     return(values$placebo_completed)
   })
   outputOptions(output, "placeboCompleted", suspendWhenHidden = FALSE)
+  
+  # Check if settings were restored
+  output$settingsRestored <- reactive({
+    return(values$settings_restored)
+  })
+  outputOptions(output, "settingsRestored", suspendWhenHidden = FALSE)
 
   # Data preview table
   output$dataPreview <- DT::renderDataTable({
