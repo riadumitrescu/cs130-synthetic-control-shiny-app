@@ -102,7 +102,7 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
   # Prepare data using Synth::dataprep()
   message("Running dataprep()...")
   dataprep_out <- tryCatch({
-    dataprep(
+    result <- dataprep(
       foo = data,
       predictors = predictor_vars,          # Regular predictors (pre-treatment mean)
       predictors.op = "mean",
@@ -116,6 +116,19 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
       time.optimize.ssr = pre_times,
       time.plot = all_times
     )
+    
+    # Validate dataprep result
+    if(is.null(result)) {
+      stop("dataprep() returned NULL")
+    }
+    if(!is.list(result)) {
+      stop(paste("dataprep() returned unexpected type:", class(result)[1]))
+    }
+    if(!"Y1plot" %in% names(result) || !"Y0plot" %in% names(result)) {
+      stop("dataprep() result missing required Y1plot or Y0plot elements")
+    }
+    
+    result
   }, error = function(e) {
     stop(paste("dataprep() failed:", e$message))
   })
@@ -123,16 +136,45 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
   # Run synth() optimization directly
   message("Running synth() optimization...")
   synth_out <- tryCatch({
-    synth(data.prep.obj = dataprep_out, method = "BFGS")
+    result <- synth(data.prep.obj = dataprep_out, method = "BFGS")
+    
+    # Validate synth result
+    if(is.null(result)) {
+      stop("synth() returned NULL")
+    }
+    if(!is.list(result)) {
+      stop(paste("synth() returned unexpected type:", class(result)[1]))
+    }
+    if(!"solution.w" %in% names(result)) {
+      stop("synth() result missing required solution.w element")
+    }
+    
+    result
   }, error = function(e) {
     stop(paste("synth() optimization failed:", e$message))
   })
   
   # Extract results using synth.tab()
-  synth_tables <- synth.tab(dataprep.res = dataprep_out, synth.res = synth_out)
+  synth_tables <- tryCatch({
+    result <- synth.tab(dataprep.res = dataprep_out, synth.res = synth_out)
+    if(is.null(result) || !is.list(result)) {
+      stop(paste("synth.tab() returned unexpected type:", class(result)[1]))
+    }
+    result
+  }, error = function(e) {
+    stop(paste("synth.tab() failed:", e$message))
+  })
   
-  # Extract ALL weights with proper unit names
-  weights_vec <- as.numeric(synth_out$solution.w)
+  # Extract ALL weights with proper unit names - use [[ for safety
+  weights_vec <- tryCatch({
+    w <- as.numeric(synth_out[["solution.w"]])
+    if(length(w) == 0 || any(is.na(w))) {
+      stop("solution.w is empty or contains NA values")
+    }
+    w
+  }, error = function(e) {
+    stop(paste("Failed to extract weights:", e$message))
+  })
   names(weights_vec) <- control_names
   
   # Keep all weights for donor_units count
@@ -140,9 +182,22 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
   # Filter for display (non-trivial weights only)
   display_weights <- weights_vec[weights_vec > 0.001]
   
-  # Extract outcome paths from dataprep object
-  treated_outcome <- as.numeric(dataprep_out$Y1plot)
-  synthetic_outcome <- as.numeric(dataprep_out$Y0plot %*% synth_out$solution.w)
+  # Extract outcome paths from dataprep object - use [[ for safety
+  treated_outcome <- tryCatch({
+    as.numeric(dataprep_out[["Y1plot"]])
+  }, error = function(e) {
+    stop(paste("Failed to extract Y1plot:", e$message))
+  })
+  
+  synthetic_outcome <- tryCatch({
+    y0 <- dataprep_out[["Y0plot"]]
+    if(is.null(y0)) {
+      stop("Y0plot is NULL")
+    }
+    as.numeric(y0 %*% synth_out[["solution.w"]])
+  }, error = function(e) {
+    stop(paste("Failed to calculate synthetic outcome:", e$message))
+  })
   
   outcome_path <- data.frame(
     time = all_times,
@@ -150,22 +205,32 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
     synthetic_outcome = synthetic_outcome,
     stringsAsFactors = FALSE
   )
-  outcome_path$gap <- outcome_path$treated_outcome - outcome_path$synthetic_outcome
-  outcome_path$post_treatment <- outcome_path$time >= treatment_year
+  # Add gap and post_treatment columns using [[ for safety
+  outcome_path[["gap"]] <- outcome_path[["treated_outcome"]] - outcome_path[["synthetic_outcome"]]
+  outcome_path[["post_treatment"]] <- outcome_path[["time"]] >= treatment_year
   
   # Calculate pre-treatment RMSPE
-  pre_gaps <- outcome_path$gap[!outcome_path$post_treatment]
+  pre_gaps <- outcome_path[["gap"]][!outcome_path[["post_treatment"]]]
   rmspe <- sqrt(mean(pre_gaps^2))
   
-  # Extract predictor balance from synth.tab
-  tab_pred <- synth_tables$tab.pred
+  # Extract predictor balance from synth.tab - use [[ for safety
+  tab_pred <- tryCatch({
+    pred <- synth_tables[["tab.pred"]]
+    if(is.null(pred)) {
+      stop("tab.pred is NULL")
+    }
+    pred
+  }, error = function(e) {
+    stop(paste("Failed to extract tab.pred:", e$message))
+  })
+  
   predictor_balance <- data.frame(
     predictor = rownames(tab_pred),
     treated = as.numeric(tab_pred[, 1]),
     synthetic = as.numeric(tab_pred[, 2]),
     stringsAsFactors = FALSE
   )
-  predictor_balance$difference <- predictor_balance$treated - predictor_balance$synthetic
+  predictor_balance[["difference"]] <- predictor_balance[["treated"]] - predictor_balance[["synthetic"]]
   rownames(predictor_balance) <- NULL
   
   message(paste("Synth completed. RMSPE:", round(rmspe, 4)))
@@ -225,48 +290,153 @@ run_synth_placebo <- function(data, unit_var, time_var, outcome_var,
   # Store gaps for each unit (including treated)
   all_gaps <- list()
   rmspe_ratios <- c()
+  failed_units <- c()
   
-  message(paste("Running placebo tests for", length(all_units), "units..."))
+  total_units <- length(all_units)
+  message(paste("Running placebo tests for", total_units, "units..."))
   
   for(i in seq_along(all_units)) {
     unit <- all_units[i]
-    message(paste0("[", i, "/", length(all_units), "] Testing: ", unit))
+    message(paste0("[", i, "/", total_units, "] Testing: ", unit))
     
-    tryCatch({
+    result <- tryCatch({
       # Run synth with this unit as "treated"
-      result <- run_synth_analysis(
-        data = data,
-        unit_var = unit_var,
-        time_var = time_var,
-        outcome_var = outcome_var,
-        treated_unit = unit,
-        treatment_year = treatment_year,
-        predictor_vars = predictor_vars,
-        special_predictors_config = special_predictors_config
-      )
+      synth_result <- tryCatch({
+        run_synth_analysis(
+          data = data,
+          unit_var = unit_var,
+          time_var = time_var,
+          outcome_var = outcome_var,
+          treated_unit = unit,
+          treatment_year = treatment_year,
+          predictor_vars = predictor_vars,
+          special_predictors_config = special_predictors_config
+        )
+      }, error = function(e) {
+        error_msg <- tryCatch({
+          conditionMessage(e)
+        }, error = function(e2) {
+          as.character(e)
+        })
+        stop(paste("run_synth_analysis failed:", error_msg))
+      })
       
-      # Extract gap series
+      # Validate result structure - check type BEFORE accessing elements
+      if(is.null(synth_result)) {
+        stop("Analysis returned NULL")
+      }
+      
+      # Check if it's a list/data frame before using $ operator
+      if(!is.list(synth_result) && !is.data.frame(synth_result)) {
+        result_type <- class(synth_result)[1]
+        result_str <- if(length(synth_result) <= 10) {
+          paste(synth_result, collapse = ", ")
+        } else {
+          paste(paste(head(synth_result, 5), collapse = ", "), "... (truncated)")
+        }
+        stop(paste("Analysis returned unexpected type:", result_type, "- Value:", result_str))
+      }
+      
+      # Now safe to check for outcome_path
+      if(!"outcome_path" %in% names(synth_result)) {
+        stop("Analysis result missing 'outcome_path' element")
+      }
+      
+      outcome_path <- synth_result[["outcome_path"]]  # Use [[ instead of $ for safety
+      
+      if(is.null(outcome_path)) {
+        stop("outcome_path is NULL")
+      }
+      
+      if(!is.data.frame(outcome_path)) {
+        stop(paste("outcome_path is not a data frame, got:", class(outcome_path)[1]))
+      }
+      
+      # Extract gap series - use [[ for safer access and validate columns exist
+      if(!"time" %in% names(outcome_path)) {
+        stop("outcome_path missing 'time' column")
+      }
+      if(!"gap" %in% names(outcome_path)) {
+        stop("outcome_path missing 'gap' column")
+      }
+      
+      # Extract columns safely
+      time_col <- outcome_path[["time"]]
+      gap_col <- outcome_path[["gap"]]
+      
+      # Validate they're vectors
+      if(!is.vector(time_col) || !is.vector(gap_col)) {
+        stop(paste("time or gap columns are not vectors. time:", class(time_col)[1], "gap:", class(gap_col)[1]))
+      }
+      
+      # Ensure they have the same length
+      if(length(time_col) != length(gap_col)) {
+        stop(paste("time and gap columns have different lengths:", length(time_col), "vs", length(gap_col)))
+      }
+      
       gap_df <- data.frame(
-        time = result$outcome_path$time,
-        gap = result$outcome_path$gap,
+        time = as.numeric(time_col),
+        gap = as.numeric(gap_col),
         unit = unit,
         is_treated = (unit == treated_unit),
         stringsAsFactors = FALSE
       )
-      all_gaps[[unit]] <- gap_df
       
-      # Calculate RMSPE ratio (post/pre)
-      pre_rmspe <- result$rmspe
-      post_data <- result$outcome_path[result$outcome_path$post_treatment, ]
-      post_rmspe <- sqrt(mean(post_data$gap^2))
-      
-      if(pre_rmspe > 0.001) {
-        rmspe_ratios[unit] <- post_rmspe / pre_rmspe
+      # Validate gap data
+      if(nrow(gap_df) == 0) {
+        stop("Gap data is empty")
       }
       
+      if(any(is.na(gap_df[["gap"]]))) {
+        message(paste("  Warning: Gap data contains NA values for", unit))
+      }
+      
+      all_gaps[[unit]] <- gap_df
+      
+      # Calculate RMSPE ratio (post/pre) - optional, don't fail if this doesn't work
+      tryCatch({
+        pre_rmspe <- synth_result[["rmspe"]]  # Use [[ instead of $
+        if(!is.null(pre_rmspe) && !is.na(pre_rmspe)) {
+          # Safely access post_treatment column
+          if("post_treatment" %in% names(outcome_path)) {
+            post_treatment_idx <- outcome_path[["post_treatment"]]  # Use [[ instead of $
+            if(any(post_treatment_idx, na.rm = TRUE)) {
+              post_data <- outcome_path[post_treatment_idx, , drop = FALSE]
+              if(nrow(post_data) > 0 && "gap" %in% names(post_data)) {
+                post_rmspe <- sqrt(mean(post_data[["gap"]]^2, na.rm = TRUE))  # Use [[ instead of $
+                
+                if(!is.na(pre_rmspe) && pre_rmspe > 0.001 && !is.na(post_rmspe)) {
+                  rmspe_ratios[unit] <<- post_rmspe / pre_rmspe
+                }
+              }
+            }
+          }
+        }
+      }, error = function(e) {
+        error_msg <- tryCatch({
+          conditionMessage(e)
+        }, error = function(e2) {
+          as.character(e)
+        })
+        message(paste("  Warning: Could not calculate RMSPE ratio for", unit, ":", error_msg))
+      })
+      
+      return(TRUE)
+      
     }, error = function(e) {
-      message(paste("  Placebo failed for", unit, ":", e$message))
+      error_msg <- tryCatch({
+        paste("  Placebo failed for", unit, ":", conditionMessage(e))
+      }, error = function(e2) {
+        paste("  Placebo failed for", unit, ":", as.character(e))
+      })
+      message(error_msg)
+      cat("ERROR:", error_msg, "\n")
+      return(FALSE)
     })
+    
+    if(is.null(result) || !result) {
+      failed_units <- c(failed_units, unit)
+    }
   }
   
   # Combine all gaps
@@ -274,8 +444,7 @@ run_synth_placebo <- function(data, unit_var, time_var, outcome_var,
     placebo_gaps <- do.call(rbind, all_gaps)
     rownames(placebo_gaps) <- NULL
   } else {
-    placebo_gaps <- data.frame(time = numeric(), gap = numeric(), 
-                               unit = character(), is_treated = logical())
+    stop("No successful placebo tests - all units failed. Check your data and configuration.")
   }
   
   # Calculate p-value (rank of treated unit)
@@ -284,14 +453,26 @@ run_synth_placebo <- function(data, unit_var, time_var, outcome_var,
     ranking <- mean(rmspe_ratios >= treated_ratio, na.rm = TRUE)
   } else {
     ranking <- NA
+    if(length(rmspe_ratios) == 0) {
+      message("Warning: No RMSPE ratios calculated - cannot compute ranking")
+    } else if(!treated_unit %in% names(rmspe_ratios)) {
+      message("Warning: Treated unit not in RMSPE ratios - cannot compute ranking")
+    }
   }
   
-  message(paste("Placebo tests completed.", length(all_gaps), "successful."))
+  successful_count <- length(all_gaps)
+  message(paste("Placebo tests completed.", successful_count, "/", total_units, "successful."))
+  if(length(failed_units) > 0) {
+    message(paste("Failed units:", paste(failed_units, collapse = ", ")))
+  }
   
   list(
     placebo_gaps = placebo_gaps,
     rmspe_ratios = rmspe_ratios,
-    ranking = ranking
+    ranking = ranking,
+    successful_units = successful_count,
+    total_units = total_units,
+    failed_units = failed_units
   )
 }
 

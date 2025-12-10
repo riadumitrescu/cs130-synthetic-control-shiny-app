@@ -1447,9 +1447,24 @@ server <- function(input, output, session) {
     req(values$analysis_results, input$unitVar, input$timeVar, input$outcomeVar,
         input$treatedUnit, input$treatmentYear)
 
+    # Reset state
+    values$placebo_results <- NULL
+    values$placebo_completed <- FALSE
+
     tryCatch({
-      showNotification("Running placebo tests using Synth package...", 
-                       type = "message", duration = NULL, id = "placebo_progress")
+      # Count total units for progress
+      all_units <- unique(values$data[[input$unitVar]])
+      total_units <- length(all_units)
+      
+      showNotification(
+        HTML(paste0(
+          icon("spinner", class = "fa-spin"), 
+          " Running placebo tests (0/", total_units, " units)..."
+        )), 
+        type = "message", 
+        duration = NULL, 
+        id = "placebo_progress"
+      )
 
       # Use same predictor config as main analysis
       predictor_vars <- input$predictorVars
@@ -1462,6 +1477,9 @@ server <- function(input, output, session) {
         special_predictors_config <- values$special_predictors
       }
 
+      # Run placebo tests with progress updates
+      cat("Starting placebo tests for", total_units, "units...\n")
+      
       # Run placebo tests using Synth package
       values$placebo_results <- run_synth_placebo(
         data = values$data,
@@ -1474,15 +1492,47 @@ server <- function(input, output, session) {
         special_predictors_config = special_predictors_config
       )
 
+      # Check if we got results
+      if(is.null(values$placebo_results)) {
+        stop("Placebo tests returned NULL - no results generated")
+      }
+      
+      if(is.null(values$placebo_results$placebo_gaps) || 
+         nrow(values$placebo_results$placebo_gaps) == 0) {
+        stop("Placebo tests completed but no gap data was generated. Check that units have sufficient data.")
+      }
+
       values$placebo_completed <- TRUE
+      
+      successful_units <- if(!is.null(values$placebo_results$placebo_gaps)) {
+        length(unique(values$placebo_results$placebo_gaps$unit))
+      } else {
+        0
+      }
 
       removeNotification("placebo_progress")
-      showNotification("Placebo tests completed successfully!", type = "message", duration = 3)
+      showNotification(
+        HTML(paste0(
+          icon("check-circle"), 
+          " Placebo tests completed! (", successful_units, "/", total_units, " units successful)"
+        )), 
+        type = "success", 
+        duration = 5
+      )
+      
+      cat("Placebo tests completed successfully:", successful_units, "units\n")
 
     }, error = function(e) {
       removeNotification("placebo_progress")
-      showNotification(paste("Placebo tests failed:", e$message), type = "error", duration = 5)
+      error_msg <- paste("Placebo tests failed:", e$message)
+      cat("ERROR:", error_msg, "\n")
+      showNotification(
+        HTML(paste0(icon("exclamation-triangle"), " ", error_msg)), 
+        type = "error", 
+        duration = 8
+      )
       values$placebo_completed <- FALSE
+      values$placebo_results <- NULL
     })
   })
 
