@@ -1,0 +1,155 @@
+Synthetic Control Shiny Application - Product Requirements Document (PRD)
+
+1. Product Overview
+The Synthetic Control Shiny App is a no code, simple, intuitive causal inference tool allowing users to perform synthetic control analysis by uploading a panel dataset. The interface must remain minimal, clean, and easy to navigate, enabling effortless execution of a rigorous synthetic control workflow.
+
+2. Product Vision
+Make synthetic control accessible to all users by minimizing cognitive load while ensuring scientific correctness. The app should allow a complete analysis within minutes using only an uploaded dataset and a few selections.
+
+3. Core Value Proposition
+- No coding required.
+- Fast, automatic computation of synthetic control.
+- Clean, publication-quality visualizations.
+- Simple placebo inference.
+- Extremely simple UX.
+
+4. Target Users
+Primary: Students who need to run synthetic control without coding.
+Secondary: Policy analysts wanting quick causal estimates.
+Tertiary: Instructors demonstrating the method in class.
+
+5. High-Level Requirements
+
+5.1 Functional Requirements
+
+FR1: Data Upload
+- Accept CSV or Excel.
+- Show preview.
+- Validate panel structure (unit-time combinations).
+
+FR2: Variable Mapping
+- User selects: Unit ID, Time, Outcome.
+- Optional predictor variable selection.
+
+FR3: Treatment Setup
+- User chooses treated unit and treatment year.
+- Donor pool inferred automatically.
+
+FR4: Predictor Builder
+Simple mode (default):
+- User chooses predictor variables.
+- App computes mean over pre-treatment years.
+
+Advanced mode (optional):
+- Additional transformations if needed.
+
+FR5: Synthetic Control Computation
+- Construct predictor matrices.
+- Optimize weights under non-negative and sum-to-one constraints.
+- Compute synthetic outcome path and treatment effect.
+
+FR6: Visual Outputs
+Essential plots:
+1. Actual vs Synthetic.
+2. Gap Plot (Y - Y*).
+3. Donor Weight Chart.
+Also: Pre-treatment balance table.
+
+FR7: Placebo Inference
+- Run synthetic control for donor units.
+- Display placebo gap trajectories.
+- Provide percentile ranking of treated effect.
+
+FR8: Export Tools
+- Download tables, plots, and a full PDF report.
+
+5.2 Non-Functional Requirements
+
+NFR1: UX Simplicity
+- Minimal configuration.
+- Clear, clean, calm design.
+- Workflow must be obvious.
+
+NFR2: Performance
+- Synthetic control computed instantly on small datasets.
+- Placebo inference completes in reasonable time.
+
+NFR3: Stability
+- Clear error messages.
+- Graceful handling of missing data or invalid structure.
+
+6. Detailed Feature Specifications
+
+6.1 Data Upload Module
+- User uploads dataset.
+- App previews first rows.
+- Checks time consistency and uniqueness of Unit-Time pairs.
+
+6.2 Variable Mapping
+- Dropdowns for variable selection.
+- Additional guidance text.
+- Validation of mapping.
+
+6.3 Treatment Setup
+- Treated unit dropdown.
+- Treatment year slider.
+- Automatic donor pool creation.
+
+6.4 Predictor Builder
+Simple mode:
+- Select predictor variables.
+- App computes pre-treatment means automatically.
+
+Advanced mode (optional and hidden):
+- Special predictors or transformations.
+
+6.5 Synthetic Control Computation
+- App computes weights, synthetic path, and treatment effect.
+- Displays weights and RMSPE.
+
+6.6 Visualization Module
+Plot 1: Actual vs Synthetic
+Plot 2: Gap Plot
+Plot 3: Weight Chart
+Table: Predictors balance (treated vs synthetic)
+
+6.7 Placebo Inference Module
+- Run donor-as-treated simulations.
+- Placebo plot: gray placebo lines + treated line highlighted.
+- Numeric summary: where treated effect ranks.
+
+6.8 Reporting Module
+- Export all results.
+- PDF report includes plots and summary text.
+
+7. UX Requirements
+- Extremely simple interface.
+- Minimal steps.
+- Clean layout: sidebar navigation + main content area.
+- High readability.
+- No unnecessary scientific jargon exposed to users.
+
+8. Edge Cases
+- Missing years → show explanatory warning.
+- Only one donor → block with message.
+- Predictors with no variance → warning.
+- Strong extrapolation → soft caution.
+
+9. Future Extensions (Not in MVP)
+- Multi-treated units.
+- Augmented synthetic control.
+- Customizable plot themes.
+- Additional inference tools.
+
+10. Success Metrics
+- User completes full analysis in < 2 minutes.
+- Low error frequency.
+- High satisfaction with UX simplicity.
+
+11. Creativity Allowances
+- Visual styling (colors, typography, spacing).
+- Plot theme direction.
+- Layout flavor while respecting the minimal workflow.
+- Custom onboarding or tooltips.
+
+End of PRD.
