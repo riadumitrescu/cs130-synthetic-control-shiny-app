@@ -1,8 +1,9 @@
-# Synthetic Control Analysis Functions
+# Simplified Synthetic Control Functions with Better Error Handling
+
 library(dplyr)
 library(tidyr)
 
-#' Simple synthetic control analysis (robust implementation)
+#' Simple synthetic control analysis
 #' @param data The dataset
 #' @param unit_var Unit identifier column name
 #' @param time_var Time variable column name
@@ -11,13 +12,15 @@ library(tidyr)
 #' @param treatment_year The treatment year
 #' @param predictor_vars Vector of predictor variable names
 #' @return List with analysis results
-run_synthetic_control <- function(data, unit_var, time_var, outcome_var,
-                                 treated_unit, treatment_year, predictor_vars = NULL) {
+run_synthetic_control_simple <- function(data, unit_var, time_var, outcome_var,
+                                        treated_unit, treatment_year, predictor_vars = NULL) {
 
   # Use outcome variable if no predictors specified
   if(is.null(predictor_vars)) {
     predictor_vars <- outcome_var
   }
+
+  cat("Step 1: Preparing data...\n")
 
   # Get all units and donor pool
   all_units <- unique(data[[unit_var]])
@@ -28,7 +31,9 @@ run_synthetic_control <- function(data, unit_var, time_var, outcome_var,
   }
 
   # Filter to pre-treatment period for predictor calculation
-  pre_data <- data[as.numeric(data[[time_var]]) < as.numeric(treatment_year), ]
+  pre_data <- data[data[[time_var]] < treatment_year, ]
+
+  cat("Step 2: Calculating predictor means...\n")
 
   # Calculate pre-treatment means for each predictor
   predictor_means <- pre_data %>%
@@ -51,9 +56,14 @@ run_synthetic_control <- function(data, unit_var, time_var, outcome_var,
   donor_predictors <- as.matrix(donor_rows[, predictor_vars])
   rownames(donor_predictors) <- donor_rows[[unit_var]]
 
-  # Compute synthetic control weights
+  cat("Step 3: Computing synthetic control weights...\n")
+
+  # Simple optimization: minimize sum of squared differences
   n_donors <- nrow(donor_predictors)
   n_predictors <- ncol(donor_predictors)
+
+  cat("  - Donors:", n_donors, "\n")
+  cat("  - Predictors:", n_predictors, "\n")
 
   # Use quadratic programming if available, otherwise use simple method
   tryCatch({
@@ -75,6 +85,7 @@ run_synthetic_control <- function(data, unit_var, time_var, outcome_var,
     converged <- TRUE
 
   }, error = function(e) {
+    cat("  - QP failed, using equal weights\n")
     weights <- rep(1/n_donors, n_donors)
     converged <- FALSE
   })
@@ -83,6 +94,8 @@ run_synthetic_control <- function(data, unit_var, time_var, outcome_var,
   weights[weights < 0] <- 0
   weights <- weights / sum(weights)
   names(weights) <- rownames(donor_predictors)
+
+  cat("Step 4: Computing synthetic outcome path...\n")
 
   # Create outcome matrix (time x units)
   outcome_wide <- data %>%
@@ -111,8 +124,10 @@ run_synthetic_control <- function(data, unit_var, time_var, outcome_var,
     treated_outcome = treated_outcomes,
     synthetic_outcome = synthetic_outcomes,
     gap = gaps,
-    post_treatment = as.numeric(time_periods) >= as.numeric(treatment_year)
+    post_treatment = time_periods >= treatment_year
   )
+
+  cat("Step 5: Computing fit statistics...\n")
 
   # RMSPE in pre-treatment period
   pre_period <- outcome_path[!outcome_path$post_treatment, ]
@@ -127,6 +142,8 @@ run_synthetic_control <- function(data, unit_var, time_var, outcome_var,
     difference = treated_predictors - fitted_predictors
   )
 
+  cat("✓ Analysis completed successfully!\n")
+
   return(list(
     weights = weights,
     rmspe = rmspe,
@@ -136,69 +153,5 @@ run_synthetic_control <- function(data, unit_var, time_var, outcome_var,
     treatment_year = treatment_year,
     treated_unit = treated_unit,
     donor_units = donor_names
-  ))
-}
-
-#' Run placebo tests for synthetic control
-#' @param data The dataset
-#' @param unit_var Unit identifier column name
-#' @param time_var Time variable column name
-#' @param outcome_var Outcome variable column name
-#' @param treated_unit The original treated unit
-#' @param treatment_year The treatment year
-#' @param predictor_vars Vector of predictor variable names
-#' @return List with placebo results
-run_placebo_tests <- function(data, unit_var, time_var, outcome_var,
-                             treated_unit, treatment_year, predictor_vars = NULL) {
-
-  all_units <- unique(data[[unit_var]])
-  placebo_results <- list()
-
-  # Run synthetic control for each unit as if it were treated
-  for(unit in all_units) {
-    tryCatch({
-      result <- run_synthetic_control(
-        data = data,
-        unit_var = unit_var,
-        time_var = time_var,
-        outcome_var = outcome_var,
-        treated_unit = unit,
-        treatment_year = treatment_year,
-        predictor_vars = predictor_vars
-      )
-
-      # Extract gap data
-      gap_data <- result$outcome_path[, c("time", "gap")]
-      gap_data$unit <- unit
-      gap_data$is_treated <- (unit == treated_unit)
-
-      placebo_results[[unit]] <- gap_data
-
-    }, error = function(e) {
-      # Skip units that cause errors
-    })
-  }
-
-  # Combine all placebo results
-  all_gaps <- do.call(rbind, placebo_results)
-
-  # Calculate ranking
-  post_treatment_gaps <- all_gaps[as.numeric(all_gaps$time) >= as.numeric(treatment_year), ]
-  if(nrow(post_treatment_gaps) > 0) {
-    avg_gaps_by_unit <- aggregate(gap ~ unit, data = post_treatment_gaps, FUN = mean)
-    treated_gap <- avg_gaps_by_unit[avg_gaps_by_unit$unit == treated_unit, "gap"]
-
-    if(length(treated_gap) > 0) {
-      ranking <- sum(abs(avg_gaps_by_unit$gap) >= abs(treated_gap)) / nrow(avg_gaps_by_unit)
-    } else {
-      ranking <- NA
-    }
-  } else {
-    ranking <- NA
-  }
-
-  return(list(
-    placebo_gaps = all_gaps,
-    ranking = ranking
   ))
 }
