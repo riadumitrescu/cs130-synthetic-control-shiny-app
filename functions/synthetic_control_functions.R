@@ -2,7 +2,127 @@
 library(dplyr)
 library(tidyr)
 
-#' Simple synthetic control analysis (robust implementation)
+#' Compute synthetic control weights
+#' @param treated_predictors Vector of treated unit predictor values (length K)
+#' @param donor_predictors Matrix of donor unit predictor values (J donors x K predictors)
+#' @return List containing weights and optimization details
+compute_sc_weights <- function(treated_predictors, donor_predictors) {
+
+  # Ensure inputs are matrices/vectors
+  if(is.null(donor_predictors) || nrow(donor_predictors) < 2) {
+    stop("Need at least 2 donor units for synthetic control")
+  }
+
+  n_predictors <- length(treated_predictors)
+  n_donors <- nrow(donor_predictors)
+
+  if(n_predictors != ncol(donor_predictors)) {
+    stop("Dimension mismatch between treated unit and donor predictors")
+  }
+
+  # Synthetic control minimizes ||X1 - X0*W||^2
+  # where X1 = treated predictors (K x 1), X0 = donor predictors transposed (K x J), W = weights (J x 1)
+  #
+  # Our donor_predictors is (J x K), so X0 = t(donor_predictors) is (K x J)
+  # Synthetic predictor = X0 * W = t(donor_predictors) %*% W
+  #
+  # Expanding: ||X1 - X0*W||^2 = W' * (X0'X0) * W - 2 * (X0'X1)' * W + const
+  # QP form: min 0.5 * W' * D * W - d' * W
+  # So: D = X0'X0 = donor_predictors %*% t(donor_predictors)  (J x J)
+  #     d = X0'X1 = donor_predictors %*% X1                    (J x 1)
+
+  # Compute D (J x J) and d (J x 1)
+  D <- donor_predictors %*% t(donor_predictors)
+  d <- as.numeric(donor_predictors %*% treated_predictors)
+
+  # Add small ridge to D for numerical stability (positive definiteness)
+  D <- D + diag(1e-6, n_donors)
+
+  # Constraint matrices for quadprog
+  # Equality: sum(w) = 1
+  # Inequality: w_j >= 0 for all j
+  # quadprog: Amat' %*% w >= bvec
+  Amat <- cbind(rep(1, n_donors), diag(n_donors))  # J x (1 + J)
+  bvec <- c(1, rep(0, n_donors))                    # sum=1, then lower bounds
+
+  weights <- NULL
+  converged <- FALSE
+
+  tryCatch({
+    result <- quadprog::solve.QP(Dmat = D, dvec = d, Amat = Amat, bvec = bvec, meq = 1)
+    weights <- result$solution
+    converged <- TRUE
+  }, error = function(e) {
+    warning(paste("QP optimization failed:", e$message, "- using equal weights"))
+  })
+
+  # Fallback to equal weights if optimization failed
+
+  if(is.null(weights)) {
+    weights <- rep(1/n_donors, n_donors)
+    converged <- FALSE
+  }
+
+  # Clean up weights: enforce non-negativity and sum to 1
+  weights[weights < 1e-8] <- 0
+  weights <- weights / sum(weights)
+
+  # Compute fitted synthetic predictors: X0 * W = t(donor_predictors) %*% W
+  fitted_predictors <- as.numeric(t(donor_predictors) %*% weights)
+
+  # RMSPE: root mean squared prediction error over predictors
+  rmspe <- sqrt(mean((treated_predictors - fitted_predictors)^2))
+
+  return(list(
+    weights = weights,
+    rmspe = rmspe,
+    converged = converged,
+    fitted_predictors = fitted_predictors,
+    treated_predictors = treated_predictors
+  ))
+}
+
+#' Compute synthetic control outcome path
+#' @param data The dataset
+#' @param unit_var Unit identifier column name
+#' @param time_var Time variable column name
+#' @param outcome_var Outcome variable column name
+#' @param weights Vector of donor weights
+#' @param donor_units Vector of donor unit names (in same order as weights)
+#' @return Data frame with synthetic outcome path
+compute_synthetic_outcome <- function(data, unit_var, time_var, outcome_var,
+                                     weights, donor_units) {
+
+  # Filter to donor units only
+  donor_data <- data[data[[unit_var]] %in% donor_units, ]
+
+  # Create outcome matrix (time x donors)
+  outcome_matrix <- donor_data %>%
+    select(all_of(c(unit_var, time_var, outcome_var))) %>%
+    pivot_wider(names_from = !!sym(unit_var), values_from = !!sym(outcome_var)) %>%
+    arrange(!!sym(time_var))
+
+  time_periods <- outcome_matrix[[time_var]]
+
+  # Ensure columns are in the same order as donor_units (weights)
+  # Some units might be missing from the outcome matrix
+  available_columns <- intersect(donor_units, names(outcome_matrix))
+  outcome_matrix <- outcome_matrix[, available_columns, drop = FALSE]
+
+  # Reorder weights to match available columns
+  matched_weights <- weights[available_columns]
+
+  # Compute weighted average (synthetic outcome)
+  synthetic_outcome <- as.numeric(as.matrix(outcome_matrix) %*% matched_weights)
+
+  # Return as data frame
+  data.frame(
+    time = time_periods,
+    synthetic_outcome = synthetic_outcome
+  )
+}
+
+#' Run full synthetic control analysis
 #' @param data The dataset
 #' @param unit_var Unit identifier column name
 #' @param time_var Time variable column name
@@ -10,195 +130,69 @@ library(tidyr)
 #' @param treated_unit The treated unit
 #' @param treatment_year The treatment year
 #' @param predictor_vars Vector of predictor variable names
-#' @return List with analysis results
+#' @return List with all analysis results
 run_synthetic_control <- function(data, unit_var, time_var, outcome_var,
                                  treated_unit, treatment_year, predictor_vars = NULL) {
 
-  # Use outcome variable if no predictors specified
+  # Prepare data
+  prepared_data <- prepare_sc_data(data, unit_var, time_var, outcome_var,
+                                  treated_unit, treatment_year, predictor_vars)
+
+  # Get donor units
+  donor_units <- unique(prepared_data[prepared_data$donor, unit_var])
+
+  # If no predictor variables specified, use pre-treatment outcome means
   if(is.null(predictor_vars)) {
     predictor_vars <- outcome_var
   }
 
-  # Get all units and donor pool
-  all_units <- unique(data[[unit_var]])
-  donor_units <- setdiff(all_units, treated_unit)
-
-  if(length(donor_units) < 2) {
-    stop("Need at least 2 donor units")
-  }
-
-  # Filter to pre-treatment period for predictor calculation
-  pre_data <- data[as.numeric(data[[time_var]]) < as.numeric(treatment_year), ]
-
-  # Calculate pre-treatment means for each predictor
-  predictor_means <- pre_data %>%
-    group_by(!!sym(unit_var)) %>%
-    summarise(across(all_of(predictor_vars), ~ mean(.x, na.rm = TRUE)), .groups = "drop")
+  # Calculate predictor means
+  predictor_means <- calculate_predictor_means(prepared_data, unit_var, time_var,
+                                              predictor_vars, treatment_year)
 
   # Extract treated unit predictors
-  treated_row <- predictor_means[predictor_means[[unit_var]] == treated_unit, ]
-  if(nrow(treated_row) == 0) {
-    stop(paste("Treated unit", treated_unit, "not found in data"))
+  treated_predictors <- predictor_means[treated_unit, , drop = TRUE]
+
+  # Extract donor predictors (make sure they exist in the matrix)
+  available_donors <- intersect(donor_units, rownames(predictor_means))
+  if(length(available_donors) < 2) {
+    stop("Need at least 2 donor units with complete predictor data")
   }
-  treated_predictors <- as.numeric(treated_row[, predictor_vars])
+  donor_predictors <- predictor_means[available_donors, , drop = FALSE]
 
-  # Extract donor predictors
-  donor_rows <- predictor_means[predictor_means[[unit_var]] %in% donor_units, ]
-  if(nrow(donor_rows) < 2) {
-    stop("Need at least 2 donor units with complete data")
-  }
+  # Compute weights
+  weight_results <- compute_sc_weights(treated_predictors, donor_predictors)
+  names(weight_results$weights) <- available_donors
 
-  donor_predictors <- as.matrix(donor_rows[, predictor_vars])
-  rownames(donor_predictors) <- donor_rows[[unit_var]]
+  # Compute synthetic outcome path
+  synthetic_path <- compute_synthetic_outcome(prepared_data, unit_var, time_var,
+                                             outcome_var, weight_results$weights, available_donors)
 
-  # Compute synthetic control weights
-  n_donors <- nrow(donor_predictors)
-  n_predictors <- ncol(donor_predictors)
+  # Get treated unit outcome path
+  treated_path <- prepared_data[prepared_data[[unit_var]] == treated_unit,
+                               c(time_var, outcome_var)]
+  names(treated_path) <- c("time", "treated_outcome")
 
-  # Use quadratic programming if available, otherwise use simple method
-  tryCatch({
-    library(quadprog)
+  # Merge paths and calculate gap
+  combined_path <- merge(treated_path, synthetic_path, by = "time")
+  combined_path$gap <- combined_path$treated_outcome - combined_path$synthetic_outcome
 
-    # Set up QP problem: minimize ||X1 - X0*w||^2 subject to sum(w)=1, w>=0
-    Dmat <- 2 * (t(donor_predictors) %*% donor_predictors)
-    dvec <- 2 * (t(donor_predictors) %*% matrix(treated_predictors, ncol=1))
-    dvec <- as.numeric(dvec)
-
-    # Constraints: Amat^T * w >= bvec
-    # First constraint: sum(w) = 1 (equality)
-    # Other constraints: w_i >= 0
-    Amat <- cbind(rep(1, n_donors), diag(n_donors))
-    bvec <- c(1, rep(0, n_donors))
-
-    solution <- solve.QP(Dmat = Dmat, dvec = dvec, Amat = Amat, bvec = bvec, meq = 1)
-    weights <- solution$solution
-    converged <- TRUE
-
-  }, error = function(e) {
-    weights <- rep(1/n_donors, n_donors)
-    converged <- FALSE
-  })
-
-  # Ensure weights are valid
-  weights[weights < 0] <- 0
-  weights <- weights / sum(weights)
-  names(weights) <- rownames(donor_predictors)
-
-  # Create outcome matrix (time x units)
-  outcome_wide <- data %>%
-    select(all_of(c(unit_var, time_var, outcome_var))) %>%
-    pivot_wider(names_from = !!sym(unit_var), values_from = !!sym(outcome_var)) %>%
-    arrange(!!sym(time_var))
-
-  time_periods <- outcome_wide[[time_var]]
-
-  # Get outcomes for treated unit and donors
-  treated_outcomes <- outcome_wide[[treated_unit]]
-
-  # Get donor outcomes in same order as weights
-  donor_names <- names(weights)
-  donor_outcome_matrix <- as.matrix(outcome_wide[, donor_names])
-
-  # Compute synthetic outcomes
-  synthetic_outcomes <- as.numeric(donor_outcome_matrix %*% weights)
-
-  # Calculate gaps
-  gaps <- treated_outcomes - synthetic_outcomes
-
-  # Create results data frame
-  outcome_path <- data.frame(
-    time = time_periods,
-    treated_outcome = treated_outcomes,
-    synthetic_outcome = synthetic_outcomes,
-    gap = gaps,
-    post_treatment = as.numeric(time_periods) >= as.numeric(treatment_year)
-  )
-
-  # RMSPE in pre-treatment period
-  pre_period <- outcome_path[!outcome_path$post_treatment, ]
-  rmspe <- sqrt(mean(pre_period$gap^2, na.rm = TRUE))
-
-  # Predictor balance
-  fitted_predictors <- as.numeric(t(weights) %*% donor_predictors)
-  predictor_balance <- data.frame(
-    predictor = predictor_vars,
-    treated = treated_predictors,
-    synthetic = fitted_predictors,
-    difference = treated_predictors - fitted_predictors
-  )
+  # Mark treatment period
+  combined_path$post_treatment <- combined_path$time >= treatment_year
 
   return(list(
-    weights = weights,
-    rmspe = rmspe,
-    converged = converged,
-    outcome_path = outcome_path,
-    predictor_balance = predictor_balance,
+    weights = weight_results$weights,
+    rmspe = weight_results$rmspe,
+    converged = weight_results$converged,
+    outcome_path = combined_path,
+    predictor_balance = data.frame(
+      predictor = names(treated_predictors),
+      treated = treated_predictors,
+      synthetic = weight_results$fitted_predictors,
+      difference = treated_predictors - weight_results$fitted_predictors
+    ),
     treatment_year = treatment_year,
     treated_unit = treated_unit,
-    donor_units = donor_names
-  ))
-}
-
-#' Run placebo tests for synthetic control
-#' @param data The dataset
-#' @param unit_var Unit identifier column name
-#' @param time_var Time variable column name
-#' @param outcome_var Outcome variable column name
-#' @param treated_unit The original treated unit
-#' @param treatment_year The treatment year
-#' @param predictor_vars Vector of predictor variable names
-#' @return List with placebo results
-run_placebo_tests <- function(data, unit_var, time_var, outcome_var,
-                             treated_unit, treatment_year, predictor_vars = NULL) {
-
-  all_units <- unique(data[[unit_var]])
-  placebo_results <- list()
-
-  # Run synthetic control for each unit as if it were treated
-  for(unit in all_units) {
-    tryCatch({
-      result <- run_synthetic_control(
-        data = data,
-        unit_var = unit_var,
-        time_var = time_var,
-        outcome_var = outcome_var,
-        treated_unit = unit,
-        treatment_year = treatment_year,
-        predictor_vars = predictor_vars
-      )
-
-      # Extract gap data
-      gap_data <- result$outcome_path[, c("time", "gap")]
-      gap_data$unit <- unit
-      gap_data$is_treated <- (unit == treated_unit)
-
-      placebo_results[[unit]] <- gap_data
-
-    }, error = function(e) {
-      # Skip units that cause errors
-    })
-  }
-
-  # Combine all placebo results
-  all_gaps <- do.call(rbind, placebo_results)
-
-  # Calculate ranking
-  post_treatment_gaps <- all_gaps[as.numeric(all_gaps$time) >= as.numeric(treatment_year), ]
-  if(nrow(post_treatment_gaps) > 0) {
-    avg_gaps_by_unit <- aggregate(gap ~ unit, data = post_treatment_gaps, FUN = mean)
-    treated_gap <- avg_gaps_by_unit[avg_gaps_by_unit$unit == treated_unit, "gap"]
-
-    if(length(treated_gap) > 0) {
-      ranking <- sum(abs(avg_gaps_by_unit$gap) >= abs(treated_gap)) / nrow(avg_gaps_by_unit)
-    } else {
-      ranking <- NA
-    }
-  } else {
-    ranking <- NA
-  }
-
-  return(list(
-    placebo_gaps = all_gaps,
-    ranking = ranking
+    donor_units = available_donors
   ))
 }

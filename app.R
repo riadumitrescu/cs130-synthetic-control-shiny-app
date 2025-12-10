@@ -1,5 +1,6 @@
 # Synthetic Control Shiny Application
 # A simple, no-code tool for synthetic control analysis
+# Uses the official Synth R package by Abadie et al.
 
 # Load required packages
 library(shiny)
@@ -9,11 +10,11 @@ library(readxl)
 library(dplyr)
 library(tidyr)
 library(shinydashboard)
-library(quadprog)
+library(Synth)  # Official synthetic control package
 
 # Source helper functions
 source("functions/data_functions.R")
-source("functions/synthetic_control_bulletproof.R")
+source("functions/synth_wrapper.R")
 source("functions/plotting_functions.R")
 
 # Define UI
@@ -93,11 +94,7 @@ ui <- dashboardPage(
               selectInput("timeVar", "Time Variable:",
                          choices = NULL, selected = NULL),
               selectInput("outcomeVar", "Outcome Variable:",
-                         choices = NULL, selected = NULL),
-              checkboxGroupInput("predictorVars", "Predictor Variables (required):",
-                               choices = NULL, selected = NULL),
-              p("Note: At least one predictor variable must be selected for synthetic control analysis.",
-                style = "color: #856404; font-size: 12px; font-style: italic;")
+                         choices = NULL, selected = NULL)
             ),
 
             # Treatment Configuration
@@ -123,47 +120,62 @@ ui <- dashboardPage(
           ),
 
           fluidRow(
-            # Predictor Builder
+            # Regular Predictors (time-invariant or use pre-treatment mean)
             box(
-              title = "Predictor Configuration", status = "warning", solidHeader = TRUE, width = 6,
+              title = "Predictors (Pre-treatment Mean)", status = "primary", solidHeader = TRUE, width = 6,
               conditionalPanel(
                 condition = "output.treatmentConfigured",
-                p("Choose how to build predictors for synthetic control:"),
-                radioButtons("predictorMode", "Predictor Mode:",
-                           choices = list(
-                             "Simple (Recommended)" = "simple",
-                             "Advanced" = "advanced"
-                           ),
-                           selected = "simple"),
-
-                conditionalPanel(
-                  condition = "input.predictorMode == 'simple'",
-                  p("Simple mode automatically uses pre-treatment means of selected variables.",
-                    style = "color: #6c757d; font-size: 14px;"),
-                  conditionalPanel(
-                    condition = "input.predictorVars != null && input.predictorVars.length > 0",
-                    h6("Selected Predictors:"),
-                    verbatimTextOutput("selectedPredictors", placeholder = TRUE)
-                  ),
-                  conditionalPanel(
-                    condition = "input.predictorVars == null || input.predictorVars.length == 0",
-                    div(class = "alert alert-warning", style = "font-size: 14px;",
-                        icon("exclamation-triangle"), " Please select at least one predictor variable for analysis.")
-                  )
-                ),
-
-                conditionalPanel(
-                  condition = "input.predictorMode == 'advanced'",
-                  p("Advanced mode allows custom predictor transformations.",
-                    style = "color: #6c757d; font-size: 14px;"),
-                  p("(Feature coming soon)", style = "font-style: italic; color: #dc3545;")
-                )
+                p("Select variables to use as predictors. Uses pre-treatment mean for matching.",
+                  style = "color: #6c757d; font-size: 14px;"),
+                checkboxGroupInput("predictorVars", "Select Predictor Variables:",
+                                 choices = NULL, selected = NULL),
+                p("These variables will be averaged over the entire pre-treatment period.",
+                  style = "color: #856404; font-size: 12px; font-style: italic;")
               )
             ),
-
+            
+            # Special Predictors Configuration
+            box(
+              title = "Special Predictors (Custom Time Windows)", status = "warning", solidHeader = TRUE, width = 6,
+              conditionalPanel(
+                condition = "output.treatmentConfigured",
+                p("Optional: Configure predictors with specific time windows.",
+                  style = "color: #6c757d; font-size: 14px;"),
+                
+                # Dynamic UI for special predictors
+                uiOutput("specialPredictorsUI"),
+                
+                br(),
+                fluidRow(
+                  column(4,
+                    actionButton("addPredictor", "Add", 
+                               class = "btn-info btn-sm", icon = icon("plus"))
+                  ),
+                  column(4,
+                    actionButton("removePredictor", "Remove", 
+                               class = "btn-danger btn-sm", icon = icon("minus"))
+                  ),
+                  column(4,
+                    actionButton("clearPredictors", "Clear", 
+                               class = "btn-warning btn-sm", icon = icon("trash"))
+                  )
+                )
+              )
+            )
+          ),
+          
+          fluidRow(
+            box(
+              title = "Predictor Summary", status = "info", solidHeader = TRUE, width = 12,
+              collapsible = TRUE,
+              verbatimTextOutput("predictorsSummary", placeholder = TRUE)
+            )
+          ),
+          
+          fluidRow(
             # Analysis Preview
             box(
-              title = "Analysis Preview", status = "success", solidHeader = TRUE, width = 6,
+              title = "Analysis Preview", status = "success", solidHeader = TRUE, width = 12,
               conditionalPanel(
                 condition = "output.readyForAnalysis",
                 verbatimTextOutput("analysisSummary"),
@@ -379,7 +391,9 @@ server <- function(input, output, session) {
     analysis_results = NULL,
     analysis_completed = FALSE,
     placebo_results = NULL,
-    placebo_completed = FALSE
+    placebo_completed = FALSE,
+    special_predictors = list(),  # List of special predictor configs
+    predictor_count = 0           # Counter for predictor IDs
   )
 
   # File upload handling
@@ -403,6 +417,10 @@ server <- function(input, output, session) {
     updateSelectInput(session, "timeVar", choices = names(values$data))
     updateSelectInput(session, "outcomeVar", choices = names(values$data))
     updateCheckboxGroupInput(session, "predictorVars", choices = names(values$data))
+    
+    # Reset special predictors when new data is uploaded
+    values$special_predictors <- list()
+    values$predictor_count <- 0
   })
 
   # Update treated unit choices when unit variable is selected
@@ -443,12 +461,12 @@ server <- function(input, output, session) {
   outputOptions(output, "treatmentConfigured", suspendWhenHidden = FALSE)
 
   # Check if ready for analysis
+  # Note: special predictors are optional - if none configured, uses outcome at each pre-treatment period
   output$readyForAnalysis <- reactive({
     mapped <- !is.null(input$unitVar) && !is.null(input$timeVar) && !is.null(input$outcomeVar)
     treatment <- !is.null(input$treatedUnit) && !is.null(input$treatmentYear) &&
                  input$treatedUnit != "" && !is.na(input$treatmentYear)
-    predictors <- !is.null(input$predictorVars) && length(input$predictorVars) > 0
-    return(mapped && treatment && predictors)
+    return(mapped && treatment)
   })
   outputOptions(output, "readyForAnalysis", suspendWhenHidden = FALSE)
 
@@ -512,24 +530,192 @@ server <- function(input, output, session) {
     )
   })
 
-  # Selected predictors display
-  output$selectedPredictors <- renderText({
-    req(input$predictorVars)
-    if(length(input$predictorVars) > 0) {
-      paste(input$predictorVars, collapse = "\n")
-    } else {
-      "None selected"
+  # ============================================
+  # Special Predictors Dynamic UI and Handlers
+  # ============================================
+  
+  # Dynamic UI for special predictors
+  output$specialPredictorsUI <- renderUI({
+    req(values$data, input$timeVar, input$treatmentYear)
+    
+    # Get available variables (exclude unit and time vars)
+    all_vars <- names(values$data)
+    predictor_vars <- setdiff(all_vars, c(input$unitVar, input$timeVar))
+    
+    # Get pre-treatment years for the sliders
+    all_years <- sort(unique(values$data[[input$timeVar]]))
+    pre_years <- all_years[all_years < input$treatmentYear]
+    
+    if(length(pre_years) == 0) {
+      return(div(class = "alert alert-warning", "No pre-treatment periods available"))
+    }
+    
+    min_year <- min(pre_years)
+    max_year <- max(pre_years)
+    
+    # Generate UI for each predictor in the list
+    if(length(values$special_predictors) == 0) {
+      return(div(class = "alert alert-info", style = "font-size: 13px;",
+                 icon("info-circle"), 
+                 " No special predictors configured. Click 'Add Predictor' or leave empty to use outcome at each pre-treatment period."))
+    }
+    
+    predictor_uis <- lapply(seq_along(values$special_predictors), function(i) {
+      pred <- values$special_predictors[[i]]
+      
+      fluidRow(
+        column(4,
+          selectInput(
+            inputId = paste0("pred_var_", i),
+            label = paste("Variable", i),
+            choices = predictor_vars,
+            selected = pred$var
+          )
+        ),
+        column(3,
+          numericInput(
+            inputId = paste0("pred_start_", i),
+            label = "Start Year",
+            value = pred$start,
+            min = min_year,
+            max = max_year
+          )
+        ),
+        column(3,
+          numericInput(
+            inputId = paste0("pred_end_", i),
+            label = "End Year",
+            value = pred$end,
+            min = min_year,
+            max = max_year
+          )
+        ),
+        column(2,
+          div(style = "margin-top: 25px;",
+            tags$span(class = "badge bg-primary", paste("mean"))
+          )
+        )
+      )
+    })
+    
+    do.call(tagList, predictor_uis)
+  })
+  
+  # Add predictor button
+  observeEvent(input$addPredictor, {
+    req(values$data, input$timeVar, input$treatmentYear)
+    
+    # Get defaults
+    all_vars <- names(values$data)
+    predictor_vars <- setdiff(all_vars, c(input$unitVar, input$timeVar))
+    
+    all_years <- sort(unique(values$data[[input$timeVar]]))
+    pre_years <- all_years[all_years < input$treatmentYear]
+    
+    if(length(pre_years) == 0 || length(predictor_vars) == 0) return()
+    
+    values$predictor_count <- values$predictor_count + 1
+    
+    # Add new predictor with defaults
+    new_pred <- list(
+      id = values$predictor_count,
+      var = predictor_vars[1],
+      start = min(pre_years),
+      end = max(pre_years),
+      op = "mean"
+    )
+    
+    values$special_predictors <- c(values$special_predictors, list(new_pred))
+  })
+  
+  # Remove last predictor button
+  observeEvent(input$removePredictor, {
+    if(length(values$special_predictors) > 0) {
+      values$special_predictors <- values$special_predictors[-length(values$special_predictors)]
     }
   })
-
+  
+  # Clear all predictors button
+  observeEvent(input$clearPredictors, {
+    values$special_predictors <- list()
+    values$predictor_count <- 0
+  })
+  
+  # Update special predictors when inputs change
+  observe({
+    req(values$data)
+    
+    if(length(values$special_predictors) > 0) {
+      for(i in seq_along(values$special_predictors)) {
+        var_input <- input[[paste0("pred_var_", i)]]
+        start_input <- input[[paste0("pred_start_", i)]]
+        end_input <- input[[paste0("pred_end_", i)]]
+        
+        if(!is.null(var_input)) values$special_predictors[[i]]$var <- var_input
+        if(!is.null(start_input)) values$special_predictors[[i]]$start <- start_input
+        if(!is.null(end_input)) values$special_predictors[[i]]$end <- end_input
+      }
+    }
+  })
+  
+  # Predictors summary display
+  output$predictorsSummary <- renderText({
+    lines <- c()
+    
+    # Regular predictors
+    if(!is.null(input$predictorVars) && length(input$predictorVars) > 0) {
+      lines <- c(lines, "Regular Predictors (pre-treatment mean):")
+      for(v in input$predictorVars) {
+        lines <- c(lines, paste0("  • ", v))
+      }
+    }
+    
+    # Special predictors
+    if(length(values$special_predictors) > 0) {
+      if(length(lines) > 0) lines <- c(lines, "")
+      lines <- c(lines, "Special Predictors (custom time windows):")
+      for(pred in values$special_predictors) {
+        lines <- c(lines, paste0("  • ", pred$var, " [", pred$start, "-", pred$end, "] (mean)"))
+      }
+    }
+    
+    # Default message if nothing configured
+    if(length(lines) == 0) {
+      lines <- c("No predictors configured.",
+                 "Will use outcome variable at each pre-treatment period as default.")
+    }
+    
+    paste(lines, collapse = "\n")
+  })
+  
+  # ============================================
+  # Analysis Summary
+  # ============================================
+  
   # Analysis summary
   output$analysisSummary <- renderText({
     req(input$unitVar, input$timeVar, input$outcomeVar, input$treatedUnit, input$treatmentYear)
 
-    predictors <- if(is.null(input$predictorVars) || length(input$predictorVars) == 0) {
-      "⚠️ No predictors selected!"
+    # Describe predictors
+    predictor_desc <- c()
+    
+    # Regular predictors
+    if(!is.null(input$predictorVars) && length(input$predictorVars) > 0) {
+      predictor_desc <- c(predictor_desc, paste(input$predictorVars, collapse = ", "))
+    }
+    
+    # Special predictors
+    if(length(values$special_predictors) > 0) {
+      special_summaries <- sapply(values$special_predictors, function(pred) {
+        paste0(pred$var, "[", pred$start, "-", pred$end, "]")
+      })
+      predictor_desc <- c(predictor_desc, paste(special_summaries, collapse = ", "))
+    }
+    
+    predictors <- if(length(predictor_desc) == 0) {
+      "Default: outcome at each pre-treatment period"
     } else {
-      paste(input$predictorVars, collapse = ", ")
+      paste(predictor_desc, collapse = "; ")
     }
 
     # Get donor pool info
@@ -566,22 +752,32 @@ server <- function(input, output, session) {
 
     tryCatch({
       # Show progress
-      showNotification("Running synthetic control analysis...", type = "message", duration = NULL, id = "analysis_progress")
+      showNotification("Running synthetic control analysis using Synth package...", 
+                       type = "message", duration = NULL, id = "analysis_progress")
 
-      # Validate predictors are selected
-      if(is.null(input$predictorVars) || length(input$predictorVars) == 0) {
-        stop("Please select at least one predictor variable")
+      # Build predictor configs from UI
+      # Regular predictors (pre-treatment mean)
+      predictor_vars <- input$predictorVars
+      if(is.null(predictor_vars) || length(predictor_vars) == 0) {
+        predictor_vars <- NULL
+      }
+      
+      # Special predictors (custom time windows)
+      special_predictors_config <- NULL
+      if(length(values$special_predictors) > 0) {
+        special_predictors_config <- values$special_predictors
       }
 
-      # Run the bulletproof analysis
-      values$analysis_results <- run_synthetic_control_bulletproof(
+      # Run analysis using Synth package (dataprep + synth)
+      values$analysis_results <- run_synth_analysis(
         data = values$data,
         unit_var = input$unitVar,
         time_var = input$timeVar,
         outcome_var = input$outcomeVar,
         treated_unit = input$treatedUnit,
         treatment_year = input$treatmentYear,
-        predictor_vars = input$predictorVars
+        predictor_vars = predictor_vars,
+        special_predictors_config = special_predictors_config
       )
 
       values$analysis_completed <- TRUE
@@ -696,17 +892,30 @@ server <- function(input, output, session) {
         input$treatedUnit, input$treatmentYear)
 
     tryCatch({
-      showNotification("Running placebo tests...", type = "message", duration = NULL, id = "placebo_progress")
+      showNotification("Running placebo tests using Synth package...", 
+                       type = "message", duration = NULL, id = "placebo_progress")
 
-      # Run bulletproof placebo tests
-      values$placebo_results <- run_placebo_tests_bulletproof(
+      # Use same predictor config as main analysis
+      predictor_vars <- input$predictorVars
+      if(is.null(predictor_vars) || length(predictor_vars) == 0) {
+        predictor_vars <- NULL
+      }
+      
+      special_predictors_config <- NULL
+      if(length(values$special_predictors) > 0) {
+        special_predictors_config <- values$special_predictors
+      }
+
+      # Run placebo tests using Synth package
+      values$placebo_results <- run_synth_placebo(
         data = values$data,
         unit_var = input$unitVar,
         time_var = input$timeVar,
         outcome_var = input$outcomeVar,
         treated_unit = input$treatedUnit,
         treatment_year = input$treatmentYear,
-        predictor_vars = input$predictorVars
+        predictor_vars = predictor_vars,
+        special_predictors_config = special_predictors_config
       )
 
       values$placebo_completed <- TRUE
