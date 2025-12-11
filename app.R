@@ -16,6 +16,7 @@ library(Synth)  # Official synthetic control package
 source("functions/data_functions.R")
 source("functions/synth_wrapper.R")
 source("functions/plotting_functions.R")
+source("functions/placebo_tests.R")
 
 # Define UI
 ui <- dashboardPage(
@@ -561,38 +562,95 @@ ui <- dashboardPage(
           condition = "output.analysisCompleted",
 
           fluidRow(
+            # In-Space Placebo Tests
             box(
-              title = "Placebo Test Controls", status = "primary", solidHeader = TRUE, width = 12,
-              p("Placebo tests run synthetic control on each donor unit as if it received treatment."),
-              actionButton("runPlacebo", "Run Placebo Tests",
-                          class = "btn-warning btn-lg", icon = icon("flask")),
+              title = "In-Space Placebo Tests", status = "primary", solidHeader = TRUE, width = 6,
+              p("Tests whether the treatment effect is unusually large compared to control units."),
+              p(strong("Method:"), "Run synthetic control on each donor unit as if it received treatment at the same time."),
+              br(),
+              actionButton("runInSpacePlacebo", "Run In-Space Placebo",
+                          class = "btn-warning", icon = icon("users"),
+                          style = "width: 100%; margin-bottom: 10px;"),
               conditionalPanel(
-                condition = "output.placeboCompleted",
-                hr(),
+                condition = "output.inSpacePlaceboCompleted",
                 div(class = "alert alert-success",
-                    icon("check"), " Placebo tests completed!")
+                    icon("check"), " In-space placebo tests completed!")
+              )
+            ),
+
+            # In-Time Placebo Tests
+            box(
+              title = "In-Time Placebo Tests", status = "info", solidHeader = TRUE, width = 6,
+              p("Tests whether similar effects occur at fake treatment dates."),
+              p(strong("Method:"), "Pretend treatment happened earlier, when no intervention actually occurred."),
+
+              numericInput("numFakeTimes", "Number of Fake Treatment Times:",
+                          value = 3, min = 1, max = 10, step = 1),
+              p("Fake times will be evenly spaced before the real treatment.",
+                style = "font-size: 12px; color: #6c757d;"),
+              br(),
+              actionButton("runInTimePlacebo", "Run In-Time Placebo",
+                          class = "btn-info", icon = icon("clock"),
+                          style = "width: 100%; margin-bottom: 10px;"),
+              conditionalPanel(
+                condition = "output.inTimePlaceboCompleted",
+                div(class = "alert alert-success",
+                    icon("check"), " In-time placebo tests completed!")
               )
             )
           ),
 
+          # In-Space Results
           conditionalPanel(
-            condition = "output.placeboCompleted",
-
-            # Placebo Results
+            condition = "output.inSpacePlaceboCompleted",
             fluidRow(
               box(
-                title = "Statistical Significance", status = "info", solidHeader = TRUE, width = 4,
-                valueBoxOutput("placeboRankBox", width = 12)
-              ),
-              box(
-                title = "Placebo Gap Trajectories", status = "warning", solidHeader = TRUE, width = 8,
-                plotOutput("placeboPlot", height = "400px")
+                title = "In-Space Results", status = "primary", solidHeader = TRUE, width = 12,
+                fluidRow(
+                  column(4,
+                    valueBoxOutput("inSpacePValueBox", width = 12)
+                  ),
+                  column(8,
+                    plotOutput("inSpacePlaceboPlot", height = "350px")
+                  )
+                ),
+                br(),
+                DT::dataTableOutput("inSpacePlaceboTable")
               )
-            ),
+            )
+          ),
 
+          # In-Time Results
+          conditionalPanel(
+            condition = "output.inTimePlaceboCompleted",
             fluidRow(
               box(
-                title = "Placebo Results Summary", status = "primary", solidHeader = TRUE, width = 12,
+                title = "In-Time Results", status = "info", solidHeader = TRUE, width = 12,
+                fluidRow(
+                  column(6,
+                    plotOutput("inTimePlaceboPlot", height = "350px")
+                  ),
+                  column(6,
+                    DT::dataTableOutput("inTimePlaceboTable")
+                  )
+                )
+              )
+            )
+          ),
+
+          # Legacy Placebo (Original Implementation)
+          fluidRow(
+            box(
+              title = "Legacy Placebo Test", status = "warning", solidHeader = TRUE, width = 12,
+              collapsible = TRUE, collapsed = TRUE,
+              p("Original placebo implementation (same as in-space but different interface)."),
+              actionButton("runPlacebo", "Run Legacy Placebo Tests",
+                          class = "btn-warning btn-sm", icon = icon("flask")),
+              conditionalPanel(
+                condition = "output.placeboCompleted",
+                hr(),
+                valueBoxOutput("placeboRankBox", width = 3),
+                plotOutput("placeboPlot", height = "300px"),
                 DT::dataTableOutput("placeboTable")
               )
             )
@@ -679,6 +737,10 @@ server <- function(input, output, session) {
     analysis_completed = FALSE,
     placebo_results = NULL,
     placebo_completed = FALSE,
+    in_space_placebo_results = NULL,
+    in_space_placebo_completed = FALSE,
+    in_time_placebo_results = NULL,
+    in_time_placebo_completed = FALSE,
     special_predictors = list(),  # List of special predictor configs
     predictor_count = 0,          # Counter for predictor IDs
     current_file_name = NULL,     # Current uploaded file name for localStorage
@@ -729,7 +791,7 @@ server <- function(input, output, session) {
           values$current_file_name, 
           "</strong>"
         )), 
-        type = "success", 
+        type = "message", 
         duration = 4
       )
     }
@@ -1031,6 +1093,18 @@ server <- function(input, output, session) {
     return(values$placebo_completed)
   })
   outputOptions(output, "placeboCompleted", suspendWhenHidden = FALSE)
+
+  # Check if in-space placebo tests are completed
+  output$inSpacePlaceboCompleted <- reactive({
+    return(values$in_space_placebo_completed)
+  })
+  outputOptions(output, "inSpacePlaceboCompleted", suspendWhenHidden = FALSE)
+
+  # Check if in-time placebo tests are completed
+  output$inTimePlaceboCompleted <- reactive({
+    return(values$in_time_placebo_completed)
+  })
+  outputOptions(output, "inTimePlaceboCompleted", suspendWhenHidden = FALSE)
   
   # Check if settings were restored
   output$settingsRestored <- reactive({
@@ -1516,7 +1590,7 @@ server <- function(input, output, session) {
           icon("check-circle"), 
           " Placebo tests completed! (", successful_units, "/", total_units, " units successful)"
         )), 
-        type = "success", 
+        type = "message", 
         duration = 5
       )
       
@@ -1736,6 +1810,206 @@ Average post-treatment effect: %.2f
       rmarkdown::render(tempReport, output_file = file, envir = new.env())
     }
   )
+
+  # ============================================
+  # NEW PLACEBO TEST HANDLERS
+  # ============================================
+
+  # In-Space Placebo Test
+  observeEvent(input$runInSpacePlacebo, {
+    req(values$analysis_results, input$unitVar, input$timeVar, input$outcomeVar,
+        input$treatedUnit, input$treatmentYear)
+
+    # Reset state
+    values$in_space_placebo_results <- NULL
+    values$in_space_placebo_completed <- FALSE
+
+    tryCatch({
+      showNotification(
+        HTML(paste0(icon("spinner", class = "fa-spin"), " Running in-space placebo tests...")),
+        type = "message", duration = NULL, id = "in_space_placebo_progress"
+      )
+
+      # Use same predictor config as main analysis
+      predictor_vars <- input$predictorVars
+      if(is.null(predictor_vars) || length(predictor_vars) == 0) {
+        predictor_vars <- NULL
+      }
+
+      special_predictors_config <- NULL
+      if(length(values$special_predictors) > 0) {
+        special_predictors_config <- values$special_predictors
+      }
+
+      # Run in-space placebo test
+      values$in_space_placebo_results <- in_space_placebo(
+        data = values$data,
+        outcome_var = input$outcomeVar,
+        unit_var = input$unitVar,
+        time_var = input$timeVar,
+        treated_unit = input$treatedUnit,
+        treat_time = input$treatmentYear,
+        predictor_vars = predictor_vars,
+        special_predictors_config = special_predictors_config
+      )
+
+      values$in_space_placebo_completed <- TRUE
+
+      removeNotification("in_space_placebo_progress")
+      showNotification(
+        HTML(paste0(
+          icon("check-circle"),
+          " In-space placebo completed! (",
+          values$in_space_placebo_results$successful_placebos, "/",
+          values$in_space_placebo_results$total_attempted, " successful)"
+        )),
+        type = "message", duration = 5
+      )
+
+    }, error = function(e) {
+      removeNotification("in_space_placebo_progress")
+      showNotification(
+        HTML(paste0(icon("exclamation-triangle"), " In-space placebo failed: ", e$message)),
+        type = "error", duration = 8
+      )
+      values$in_space_placebo_completed <- FALSE
+    })
+  })
+
+  # In-Time Placebo Test
+  observeEvent(input$runInTimePlacebo, {
+    req(values$analysis_results, input$unitVar, input$timeVar, input$outcomeVar,
+        input$treatedUnit, input$treatmentYear, input$numFakeTimes)
+
+    # Reset state
+    values$in_time_placebo_results <- NULL
+    values$in_time_placebo_completed <- FALSE
+
+    tryCatch({
+      showNotification(
+        HTML(paste0(icon("spinner", class = "fa-spin"), " Running in-time placebo tests...")),
+        type = "message", duration = NULL, id = "in_time_placebo_progress"
+      )
+
+      # Generate fake treatment times
+      all_times <- sort(unique(values$data[[input$timeVar]]))
+      pre_times <- all_times[all_times < input$treatmentYear]
+
+      # Minimum periods required for each fake test (matching the function defaults)
+      min_pre_periods <- 3
+      min_post_periods <- 2
+      min_total_buffer <- min_pre_periods + min_post_periods
+
+      if(length(pre_times) < min_total_buffer + input$numFakeTimes) {
+        stop(paste("Not enough pre-treatment periods. Need at least",
+                  min_total_buffer + input$numFakeTimes,
+                  "pre-treatment periods for", input$numFakeTimes, "fake times"))
+      }
+
+      # Create evenly spaced fake times, ensuring sufficient periods
+      min_fake <- min(pre_times) + min_pre_periods  # Leave buffer for pre-periods
+      max_fake <- input$treatmentYear - min_post_periods - 1  # Leave buffer for post-periods
+
+      if(max_fake <= min_fake) {
+        stop("Not enough time periods for fake treatment times with required buffers")
+      }
+
+      fake_treat_times <- seq(min_fake, max_fake, length.out = input$numFakeTimes)
+      fake_treat_times <- round(fake_treat_times)
+      fake_treat_times <- unique(fake_treat_times)
+
+      # Ensure fake times exist in the data
+      fake_treat_times <- fake_treat_times[fake_treat_times %in% pre_times]
+
+      if(length(fake_treat_times) == 0) {
+        stop("No valid fake treatment times could be generated")
+      }
+
+      # Use same predictor config as main analysis
+      predictor_vars <- input$predictorVars
+      if(is.null(predictor_vars) || length(predictor_vars) == 0) {
+        predictor_vars <- NULL
+      }
+
+      special_predictors_config <- NULL
+      if(length(values$special_predictors) > 0) {
+        special_predictors_config <- values$special_predictors
+      }
+
+      # Run in-time placebo test
+      values$in_time_placebo_results <- in_time_placebo(
+        data = values$data,
+        outcome_var = input$outcomeVar,
+        unit_var = input$unitVar,
+        time_var = input$timeVar,
+        treated_unit = input$treatedUnit,
+        true_treat_time = input$treatmentYear,
+        fake_treat_times = fake_treat_times,
+        predictor_vars = predictor_vars,
+        special_predictors_config = special_predictors_config
+      )
+
+      values$in_time_placebo_completed <- TRUE
+
+      removeNotification("in_time_placebo_progress")
+      showNotification(
+        HTML(paste0(
+          icon("check-circle"),
+          " In-time placebo completed! (",
+          values$in_time_placebo_results$successful_tests, "/",
+          values$in_time_placebo_results$total_attempted, " successful)"
+        )),
+        type = "message", duration = 5
+      )
+
+    }, error = function(e) {
+      removeNotification("in_time_placebo_progress")
+      showNotification(
+        HTML(paste0(icon("exclamation-triangle"), " In-time placebo failed: ", e$message)),
+        type = "error", duration = 8
+      )
+      values$in_time_placebo_completed <- FALSE
+    })
+  })
+
+  # In-Space Placebo Outputs
+  output$inSpacePValueBox <- renderValueBox({
+    valueBox(
+      value = if(!is.null(values$in_space_placebo_results) && !is.na(values$in_space_placebo_results$p_value)) {
+        paste0(round(values$in_space_placebo_results$p_value * 100, 1), "%")
+      } else {
+        "N/A"
+      },
+      subtitle = "P-value (In-Space)",
+      icon = icon("percentage"),
+      color = "orange"
+    )
+  })
+
+  output$inSpacePlaceboPlot <- renderPlot({
+    req(values$in_space_placebo_results)
+    plot_in_space_placebo(values$in_space_placebo_results)
+  })
+
+  output$inSpacePlaceboTable <- DT::renderDataTable({
+    req(values$in_space_placebo_results)
+    DT::datatable(values$in_space_placebo_results$summary_df,
+                  options = list(pageLength = 10),
+                  class = "compact stripe")
+  })
+
+  # In-Time Placebo Outputs
+  output$inTimePlaceboPlot <- renderPlot({
+    req(values$in_time_placebo_results)
+    plot_in_time_placebo(values$in_time_placebo_results)
+  })
+
+  output$inTimePlaceboTable <- DT::renderDataTable({
+    req(values$in_time_placebo_results)
+    DT::datatable(values$in_time_placebo_results$summary_df,
+                  options = list(pageLength = 10),
+                  class = "compact stripe")
+  })
 
 }
 

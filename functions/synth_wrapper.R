@@ -36,7 +36,7 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
   id_to_unit <- setNames(all_units, seq_len(n_units))
   
   # Add numeric unit ID column to data
-  data$unit_num <- unit_to_id[as.character(data[[unit_var]])]
+  data[["unit_num"]] <- unit_to_id[as.character(data[[unit_var]])]
   
   # Get treated and control IDs
   treated_id <- unit_to_id[[as.character(treated_unit)]]
@@ -62,10 +62,10 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
   if(!is.null(special_predictors_config) && length(special_predictors_config) > 0) {
     for(i in seq_along(special_predictors_config)) {
       cfg <- special_predictors_config[[i]]
-      var_name <- cfg$var
-      start_year <- cfg$start
-      end_year <- cfg$end
-      op <- if(!is.null(cfg$op)) cfg$op else "mean"
+      var_name <- cfg[["var"]]
+      start_year <- cfg[["start"]]
+      end_year <- cfg[["end"]]
+      op <- if(!is.null(cfg[["op"]])) cfg[["op"]] else "mean"
       
       # Create time range within pre-treatment period
       time_range <- seq(start_year, end_year)
@@ -210,7 +210,8 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
   outcome_path[["post_treatment"]] <- outcome_path[["time"]] >= treatment_year
   
   # Calculate pre-treatment RMSPE
-  pre_gaps <- outcome_path[["gap"]][!outcome_path[["post_treatment"]]]
+  post_treatment_vec <- outcome_path[["post_treatment"]]
+  pre_gaps <- outcome_path[["gap"]][!post_treatment_vec]
   rmspe <- sqrt(mean(pre_gaps^2))
   
   # Extract predictor balance from synth.tab - use [[ for safety
@@ -406,7 +407,7 @@ run_synth_placebo <- function(data, unit_var, time_var, outcome_var,
                 post_rmspe <- sqrt(mean(post_data[["gap"]]^2, na.rm = TRUE))  # Use [[ instead of $
                 
                 if(!is.na(pre_rmspe) && pre_rmspe > 0.001 && !is.na(post_rmspe)) {
-                  rmspe_ratios[unit] <<- post_rmspe / pre_rmspe
+                  rmspe_ratios[unit] <- post_rmspe / pre_rmspe
                 }
               }
             }
