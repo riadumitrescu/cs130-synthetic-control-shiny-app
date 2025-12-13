@@ -11,6 +11,7 @@ library(dplyr)
 library(tidyr)
 library(shinydashboard)
 library(Synth)  # Official synthetic control package
+library(rmarkdown)  # For PDF report generation
 
 # Source helper functions
 source("functions/data_functions.R")
@@ -60,7 +61,8 @@ ui <- dashboardPage(
       menuItem("2. Configure Analysis", tabName = "config", icon = icon("cog")),
       menuItem("3. Results", tabName = "results", icon = icon("chart-line")),
       menuItem("4. Placebo Tests", tabName = "placebo", icon = icon("flask")),
-      menuItem("5. Export", tabName = "export", icon = icon("download"))
+      menuItem("5. Export", tabName = "export", icon = icon("download")),
+      menuItem("6. Analysis History", tabName = "history", icon = icon("history"))
     )
   ),
 
@@ -93,8 +95,9 @@ ui <- dashboardPage(
         // IndexedDB Storage Manager for Synthetic Control App Settings
         (function() {
           const DB_NAME = 'SyntheticControlDB';
-          const DB_VERSION = 1;
+          const DB_VERSION = 2;
           const STORE_NAME = 'settings';
+          const ANALYSIS_STORE_NAME = 'analyses';
           let db = null;
           
           // Initialize IndexedDB
@@ -120,10 +123,21 @@ ui <- dashboardPage(
               
               request.onupgradeneeded = function(event) {
                 const db = event.target.result;
+
+                // Settings store
                 if (!db.objectStoreNames.contains(STORE_NAME)) {
                   const objectStore = db.createObjectStore(STORE_NAME, { keyPath: 'fileName' });
                   objectStore.createIndex('savedAt', 'savedAt', { unique: false });
-                  console.log('IndexedDB store created');
+                  console.log('IndexedDB settings store created');
+                }
+
+                // Analysis results store
+                if (!db.objectStoreNames.contains(ANALYSIS_STORE_NAME)) {
+                  const analysisStore = db.createObjectStore(ANALYSIS_STORE_NAME, { keyPath: 'analysisId' });
+                  analysisStore.createIndex('savedAt', 'savedAt', { unique: false });
+                  analysisStore.createIndex('fileName', 'fileName', { unique: false });
+                  analysisStore.createIndex('treatedUnit', 'treatedUnit', { unique: false });
+                  console.log('IndexedDB analyses store created');
                 }
               };
             });
@@ -264,16 +278,150 @@ ui <- dashboardPage(
               const transaction = db.transaction([STORE_NAME], 'readwrite');
               const store = transaction.objectStore(STORE_NAME);
               const request = store.delete(fileName);
-              
+
               request.onsuccess = function() {
                 console.log('Settings cleared for:', fileName);
               };
-              
+
               request.onerror = function() {
                 console.error('Error clearing settings:', request.error);
               };
             }).catch(function(error) {
               console.error('Failed to clear settings:', error);
+            });
+          };
+
+          // === ANALYSIS RESULTS FUNCTIONS ===
+
+          // Save analysis results to IndexedDB
+          window.saveAnalysisResults = function(analysisData) {
+            initDB().then(function(db) {
+              const transaction = db.transaction([ANALYSIS_STORE_NAME], 'readwrite');
+              const store = transaction.objectStore(ANALYSIS_STORE_NAME);
+
+              const data = {
+                analysisId: analysisData.analysisId,
+                fileName: analysisData.fileName,
+                treatedUnit: analysisData.treatedUnit,
+                treatmentYear: analysisData.treatmentYear,
+                analysisResults: analysisData.analysisResults,
+                analysisConfig: analysisData.analysisConfig,
+                savedAt: new Date().toISOString(),
+                rmspe: analysisData.rmspe,
+                converged: analysisData.converged
+              };
+
+              const request = store.put(data);
+
+              request.onsuccess = function() {
+                console.log('Analysis results saved successfully:', data.analysisId);
+              };
+
+              request.onerror = function() {
+                console.error('Error saving analysis results:', request.error);
+              };
+            }).catch(function(error) {
+              console.error('Failed to save analysis results:', error);
+            });
+          };
+
+          // Get all saved analyses
+          window.getAllAnalyses = function() {
+            return new Promise((resolve) => {
+              initDB().then(function(db) {
+                const transaction = db.transaction([ANALYSIS_STORE_NAME], 'readonly');
+                const store = transaction.objectStore(ANALYSIS_STORE_NAME);
+                const request = store.getAll();
+
+                request.onsuccess = function() {
+                  const analyses = request.result.map(item => ({
+                    analysisId: item.analysisId,
+                    fileName: item.fileName,
+                    treatedUnit: item.treatedUnit,
+                    treatmentYear: item.treatmentYear,
+                    savedAt: item.savedAt,
+                    rmspe: item.rmspe,
+                    converged: item.converged
+                  }));
+                  console.log('Retrieved analyses:', analyses.length);
+                  resolve(analyses);
+                };
+
+                request.onerror = function() {
+                  console.error('Error getting analyses:', request.error);
+                  resolve([]);
+                };
+              }).catch(function(error) {
+                console.error('Failed to get analyses:', error);
+                resolve([]);
+              });
+            });
+          };
+
+          // Load specific analysis results
+          window.loadAnalysisResults = function(analysisId) {
+            return new Promise((resolve) => {
+              initDB().then(function(db) {
+                const transaction = db.transaction([ANALYSIS_STORE_NAME], 'readonly');
+                const store = transaction.objectStore(ANALYSIS_STORE_NAME);
+                const request = store.get(analysisId);
+
+                request.onsuccess = function() {
+                  if (request.result) {
+                    console.log('Analysis loaded:', analysisId);
+                    resolve(request.result);
+                  } else {
+                    console.log('Analysis not found:', analysisId);
+                    resolve(null);
+                  }
+                };
+
+                request.onerror = function() {
+                  console.error('Error loading analysis:', request.error);
+                  resolve(null);
+                };
+              }).catch(function(error) {
+                console.error('Failed to load analysis:', error);
+                resolve(null);
+              });
+            });
+          };
+
+          // Delete analysis
+          window.deleteAnalysis = function(analysisId) {
+            initDB().then(function(db) {
+              const transaction = db.transaction([ANALYSIS_STORE_NAME], 'readwrite');
+              const store = transaction.objectStore(ANALYSIS_STORE_NAME);
+              const request = store.delete(analysisId);
+
+              request.onsuccess = function() {
+                console.log('Analysis deleted:', analysisId);
+              };
+
+              request.onerror = function() {
+                console.error('Error deleting analysis:', request.error);
+              };
+            }).catch(function(error) {
+              console.error('Failed to delete analysis:', error);
+            });
+          };
+
+          // Clear all analyses
+          window.clearAllAnalyses = function() {
+            initDB().then(function(db) {
+              const transaction = db.transaction([ANALYSIS_STORE_NAME], 'readwrite');
+              const store = transaction.objectStore(ANALYSIS_STORE_NAME);
+              const request = store.clear();
+
+              request.onsuccess = function() {
+                console.log('All analyses cleared');
+              };
+
+              request.onerror = function() {
+                console.error('Error clearing all analyses:', request.error);
+              };
+            }).catch(function(error) {
+              console.error('Failed to clear all analyses:', error);
             });
           };
           
@@ -298,6 +446,62 @@ ui <- dashboardPage(
                 }
               });
             }
+          });
+
+          // === ANALYSIS RESULTS MESSAGE HANDLERS ===
+
+          // Listen for save analysis results
+          Shiny.addCustomMessageHandler('saveAnalysisResults', function(message) {
+            if (message.analysisData) {
+              console.log('Received saveAnalysisResults message');
+              saveAnalysisResults(message.analysisData);
+            }
+          });
+
+          // Listen for get all analyses
+          Shiny.addCustomMessageHandler('getAllAnalyses', function(message) {
+            console.log('Received getAllAnalyses message');
+            getAllAnalyses().then(function(analyses) {
+              Shiny.setInputValue('analysis_history_data', analyses, {priority: 'event'});
+            });
+          });
+
+          // Listen for load analysis
+          Shiny.addCustomMessageHandler('loadAnalysisResults', function(message) {
+            if (message.analysisId) {
+              console.log('Received loadAnalysisResults message for:', message.analysisId);
+              loadAnalysisResults(message.analysisId).then(function(analysis) {
+                if (analysis) {
+                  Shiny.setInputValue('loaded_analysis_data', analysis, {priority: 'event'});
+                } else {
+                  console.log('Analysis not found');
+                }
+              });
+            }
+          });
+
+          // Listen for delete analysis
+          Shiny.addCustomMessageHandler('deleteAnalysis', function(message) {
+            if (message.analysisId) {
+              console.log('Received deleteAnalysis message for:', message.analysisId);
+              deleteAnalysis(message.analysisId);
+              // Refresh the list
+              setTimeout(function() {
+                getAllAnalyses().then(function(analyses) {
+                  Shiny.setInputValue('analysis_history_data', analyses, {priority: 'event'});
+                });
+              }, 100);
+            }
+          });
+
+          // Listen for clear all analyses
+          Shiny.addCustomMessageHandler('clearAllAnalyses', function(message) {
+            console.log('Received clearAllAnalyses message');
+            clearAllAnalyses();
+            // Refresh the list
+            setTimeout(function() {
+              Shiny.setInputValue('analysis_history_data', [], {priority: 'event'});
+            }, 100);
           });
           
           // Auto-save settings when inputs change (debounced)
@@ -702,9 +906,30 @@ ui <- dashboardPage(
             box(
               title = "PDF Report", status = "success", solidHeader = TRUE, width = 12,
               p("Generate a comprehensive PDF report with all results, plots, and analysis summary."),
-              downloadButton("downloadReport", "Generate PDF Report",
-                           class = "btn-success btn-lg", style = "width: 100%;", icon = icon("file-pdf")),
-              br(), br(),
+
+              fluidRow(
+                column(6,
+                  actionButton("previewReport", "Preview Report",
+                             class = "btn-info btn-lg", style = "width: 100%; margin-bottom: 10px;",
+                             icon = icon("eye"))
+                ),
+                column(6,
+                  downloadButton("downloadReport", "Generate PDF Report",
+                               class = "btn-success btn-lg", style = "width: 100%; margin-bottom: 10px;",
+                               icon = icon("file-pdf"))
+                )
+              ),
+
+              conditionalPanel(
+                condition = "output.reportPreviewAvailable",
+                hr(),
+                h4("Report Preview", style = "color: #2c3e50;"),
+                div(style = "max-height: 400px; overflow-y: auto; border: 1px solid #ddd; padding: 15px; background-color: #f8f9fa;",
+                    verbatimTextOutput("reportPreview")
+                )
+              ),
+
+              br(),
               div(id = "reportStatus", style = "margin-top: 15px;")
             )
           )
@@ -717,6 +942,75 @@ ui <- dashboardPage(
               title = "Export Results", status = "primary", solidHeader = TRUE, width = 12,
               div(class = "alert alert-info", style = "text-align: center; margin: 40px;",
                   icon("info-circle"), " Complete the analysis first to export results.")
+            )
+          )
+        )
+      ),
+
+      # Analysis History Tab
+      tabItem(tabName = "history",
+        fluidRow(
+          box(
+            title = "Analysis History", status = "primary", solidHeader = TRUE, width = 12,
+            p("View and manage your saved analysis results. Each analysis is automatically saved when completed."),
+
+            fluidRow(
+              column(8,
+                actionButton("refreshHistory", "Refresh History",
+                           class = "btn-info", icon = icon("refresh"))
+              ),
+              column(4,
+                actionButton("clearAllHistory", "Clear All History",
+                           class = "btn-danger", icon = icon("trash"),
+                           onclick = "return confirm('Are you sure you want to delete all saved analyses? This cannot be undone.');")
+              )
+            ),
+            br(),
+
+            conditionalPanel(
+              condition = "output.hasHistoryData",
+              DT::dataTableOutput("historyTable"),
+              br(),
+
+              conditionalPanel(
+                condition = "input.historyTable_rows_selected.length > 0",
+                fluidRow(
+                  box(
+                    title = "Selected Analysis Details", status = "info", solidHeader = TRUE, width = 12,
+                    fluidRow(
+                      column(4,
+                        actionButton("loadSelectedAnalysis", "Load Analysis",
+                                   class = "btn-success btn-lg", style = "width: 100%;",
+                                   icon = icon("upload"))
+                      ),
+                      column(4,
+                        actionButton("viewSelectedSummary", "View Summary",
+                                   class = "btn-info btn-lg", style = "width: 100%;",
+                                   icon = icon("eye"))
+                      ),
+                      column(4,
+                        actionButton("deleteSelected", "Delete Selected",
+                                   class = "btn-danger btn-lg", style = "width: 100%;",
+                                   icon = icon("trash"))
+                      )
+                    ),
+
+                    conditionalPanel(
+                      condition = "output.showAnalysisSummary",
+                      hr(),
+                      h4("Analysis Summary"),
+                      verbatimTextOutput("selectedAnalysisSummary")
+                    )
+                  )
+                )
+              )
+            ),
+
+            conditionalPanel(
+              condition = "!output.hasHistoryData",
+              div(class = "alert alert-info", style = "text-align: center; margin: 40px;",
+                  icon("info-circle"),
+                  " No saved analyses found. Complete an analysis to see it here automatically.")
             )
           )
         )
@@ -745,7 +1039,12 @@ server <- function(input, output, session) {
     predictor_count = 0,          # Counter for predictor IDs
     current_file_name = NULL,     # Current uploaded file name for localStorage
     settings_restored = FALSE,    # Flag to track if settings were restored
-    pending_settings = NULL       # Settings waiting to be restored
+    pending_settings = NULL,      # Settings waiting to be restored
+    report_preview = NULL,        # Preview content for the report
+    report_preview_available = FALSE,  # Flag for preview availability
+    analysis_history = NULL,      # List of saved analyses
+    selected_history_analysis = NULL,  # Currently selected analysis from history
+    show_analysis_summary = FALSE  # Flag for showing analysis summary
   )
 
   # Helper function to save current settings
@@ -1112,6 +1411,24 @@ server <- function(input, output, session) {
   })
   outputOptions(output, "settingsRestored", suspendWhenHidden = FALSE)
 
+  # Check if report preview is available
+  output$reportPreviewAvailable <- reactive({
+    return(values$report_preview_available)
+  })
+  outputOptions(output, "reportPreviewAvailable", suspendWhenHidden = FALSE)
+
+  # Check if analysis history data is available
+  output$hasHistoryData <- reactive({
+    return(!is.null(values$analysis_history) && length(values$analysis_history) > 0)
+  })
+  outputOptions(output, "hasHistoryData", suspendWhenHidden = FALSE)
+
+  # Check if analysis summary should be shown
+  output$showAnalysisSummary <- reactive({
+    return(values$show_analysis_summary)
+  })
+  outputOptions(output, "showAnalysisSummary", suspendWhenHidden = FALSE)
+
   # Data preview table
   output$dataPreview <- DT::renderDataTable({
     req(values$data)
@@ -1412,9 +1729,39 @@ server <- function(input, output, session) {
 
       values$analysis_completed <- TRUE
 
+      # Save analysis results to IndexedDB
+      tryCatch({
+        analysis_id <- paste0(
+          gsub("[^A-Za-z0-9]", "_", input$treatedUnit), "_",
+          input$treatmentYear, "_",
+          format(Sys.time(), "%Y%m%d_%H%M%S")
+        )
+
+        analysis_data <- list(
+          analysisId = analysis_id,
+          fileName = if(!is.null(values$current_file_name)) values$current_file_name else "unknown_file",
+          treatedUnit = input$treatedUnit,
+          treatmentYear = input$treatmentYear,
+          analysisResults = values$analysis_results,
+          analysisConfig = list(
+            unitVar = input$unitVar,
+            timeVar = input$timeVar,
+            outcomeVar = input$outcomeVar,
+            predictorVars = input$predictorVars,
+            special_predictors = values$special_predictors
+          ),
+          rmspe = values$analysis_results$rmspe,
+          converged = values$analysis_results$converged
+        )
+
+        session$sendCustomMessage("saveAnalysisResults", list(analysisData = analysis_data))
+      }, error = function(e) {
+        cat("Error saving analysis results:", e$message, "\n")
+      })
+
       # Remove progress notification and show success
       removeNotification("analysis_progress")
-      showNotification("Analysis completed successfully!", type = "message", duration = 3)
+      showNotification("Analysis completed and saved successfully!", type = "message", duration = 3)
 
     }, error = function(e) {
       removeNotification("analysis_progress")
@@ -1675,6 +2022,316 @@ server <- function(input, output, session) {
                   class = "compact stripe")
   })
 
+  # Report preview handler
+  observeEvent(input$previewReport, {
+    req(values$analysis_results)
+
+    tryCatch({
+      showNotification("Generating report preview...", type = "message", duration = 2, id = "preview_progress")
+
+      # Safely extract values
+      treated_unit <- as.character(values$analysis_results$treated_unit)
+      treatment_year <- as.character(values$analysis_results$treatment_year)
+      num_donors <- length(values$analysis_results$donor_units)
+      rmspe <- as.numeric(values$analysis_results$rmspe)
+      converged <- ifelse(values$analysis_results$converged, "Yes", "No")
+
+      # Calculate metrics
+      post_treatment_data <- values$analysis_results$outcome_path[values$analysis_results$outcome_path$post_treatment, ]
+      avg_treatment_effect <- mean(post_treatment_data$gap, na.rm = TRUE)
+
+      pre_treatment_data <- values$analysis_results$outcome_path[!values$analysis_results$outcome_path$post_treatment, ]
+      treated_mean <- mean(pre_treatment_data$treated_outcome, na.rm = TRUE)
+      synthetic_mean <- mean(pre_treatment_data$synthetic_outcome, na.rm = TRUE)
+
+      # Create weights summary
+      weights_summary <- data.frame(
+        Unit = names(values$analysis_results$weights),
+        Weight = as.numeric(values$analysis_results$weights)
+      ) %>%
+        filter(Weight > 0) %>%
+        arrange(desc(Weight)) %>%
+        head(5)  # Top 5 weights
+
+      weights_text <- paste(sprintf("%s: %.3f", weights_summary$Unit, weights_summary$Weight), collapse = ", ")
+
+      # Statistical inference
+      stat_inference <- if(values$placebo_completed) {
+        sprintf("Placebo test p-value: %.3f", values$placebo_results$ranking)
+      } else {
+        "Run placebo tests for statistical inference"
+      }
+
+      # Create preview text
+      preview_text <- sprintf(
+"SYNTHETIC CONTROL ANALYSIS REPORT
+
+EXECUTIVE SUMMARY
+=================
+Analysis of intervention on %s starting in %s using synthetic control method.
+
+ANALYSIS CONFIGURATION
+======================
+• Treated Unit: %s
+• Treatment Year: %s
+• Number of Donor Units: %d
+• Pre-treatment RMSPE: %.4f
+• Analysis Converged: %s
+
+KEY RESULTS
+===========
+• Average Post-treatment Effect: %.3f
+• Pre-treatment Fit (Treated): %.3f
+• Pre-treatment Fit (Synthetic): %.3f
+
+TOP DONOR WEIGHTS
+=================
+%s
+
+STATISTICAL INFERENCE
+====================
+%s
+
+INTERPRETATION
+==============
+- Pre-treatment RMSPE of %.4f indicates the quality of fit
+- The synthetic control method provides a data-driven counterfactual
+- Treatment effect represents the difference between actual and synthetic outcomes
+
+Note: This is a text preview. The full PDF report includes:
+• High-resolution plots showing actual vs synthetic outcomes
+• Treatment effect visualization over time
+• Donor unit weights bar chart
+• Placebo test results (if available)
+• Detailed tables and technical notes
+
+Generated on %s",
+        treated_unit, treatment_year,
+        treated_unit, treatment_year, num_donors, rmspe, converged,
+        avg_treatment_effect, treated_mean, synthetic_mean,
+        weights_text,
+        stat_inference,
+        rmspe,
+        Sys.Date()
+      )
+
+      values$report_preview <- preview_text
+      values$report_preview_available <- TRUE
+
+      removeNotification("preview_progress")
+      showNotification("Report preview ready!", type = "message", duration = 3)
+
+    }, error = function(e) {
+      removeNotification("preview_progress")
+      values$report_preview <- paste("Error generating preview:", e$message)
+      values$report_preview_available <- TRUE
+      showNotification("Error generating preview", type = "error", duration = 3)
+    })
+  })
+
+  # Report preview output
+  output$reportPreview <- renderText({
+    req(values$report_preview)
+    values$report_preview
+  })
+
+  # ============================================
+  # ANALYSIS HISTORY HANDLERS
+  # ============================================
+
+  # Handle analysis history data from IndexedDB
+  observeEvent(input$analysis_history_data, {
+    req(input$analysis_history_data)
+    values$analysis_history <- input$analysis_history_data
+  })
+
+  # Refresh history button
+  observeEvent(input$refreshHistory, {
+    session$sendCustomMessage("getAllAnalyses", list())
+    showNotification("Refreshing analysis history...", type = "message", duration = 2)
+  })
+
+  # Clear all history button
+  observeEvent(input$clearAllHistory, {
+    session$sendCustomMessage("clearAllAnalyses", list())
+    values$analysis_history <- NULL
+    showNotification("All analysis history cleared!", type = "warning", duration = 3)
+  })
+
+  # History table
+  output$historyTable <- DT::renderDataTable({
+    req(values$analysis_history)
+
+    # Format the data for display
+    history_df <- data.frame(
+      `Analysis ID` = sapply(values$analysis_history, function(x) x$analysisId),
+      `File Name` = sapply(values$analysis_history, function(x) x$fileName),
+      `Treated Unit` = sapply(values$analysis_history, function(x) x$treatedUnit),
+      `Treatment Year` = sapply(values$analysis_history, function(x) x$treatmentYear),
+      `RMSPE` = round(sapply(values$analysis_history, function(x) as.numeric(x$rmspe)), 4),
+      `Converged` = sapply(values$analysis_history, function(x) if(x$converged) "Yes" else "No"),
+      `Saved At` = sapply(values$analysis_history, function(x) {
+        format(as.POSIXct(x$savedAt), "%Y-%m-%d %H:%M")
+      }),
+      stringsAsFactors = FALSE
+    )
+
+    DT::datatable(
+      history_df,
+      selection = "single",
+      options = list(
+        pageLength = 10,
+        scrollX = TRUE,
+        ordering = TRUE,
+        order = list(list(6, "desc"))  # Sort by date descending
+      ),
+      class = "compact stripe"
+    )
+  })
+
+  # View selected summary button
+  observeEvent(input$viewSelectedSummary, {
+    req(input$historyTable_rows_selected)
+    selected_row <- input$historyTable_rows_selected
+    req(selected_row <= length(values$analysis_history))
+
+    selected_analysis <- values$analysis_history[[selected_row]]
+    values$selected_history_analysis <- selected_analysis
+    values$show_analysis_summary <- TRUE
+
+    showNotification("Analysis summary loaded!", type = "message", duration = 2)
+  })
+
+  # Selected analysis summary output
+  output$selectedAnalysisSummary <- renderText({
+    req(values$selected_history_analysis)
+
+    analysis <- values$selected_history_analysis
+
+    summary_text <- sprintf(
+"Analysis ID: %s
+File Name: %s
+Treated Unit: %s
+Treatment Year: %s
+RMSPE: %.4f
+Converged: %s
+Saved At: %s
+
+Configuration:
+- Unit Variable: %s
+- Time Variable: %s
+- Outcome Variable: %s
+- Predictor Variables: %s
+
+This analysis can be loaded to view all results, plots, and details.",
+      analysis$analysisId,
+      analysis$fileName,
+      analysis$treatedUnit,
+      analysis$treatmentYear,
+      as.numeric(analysis$rmspe),
+      if(analysis$converged) "Yes" else "No",
+      format(as.POSIXct(analysis$savedAt), "%Y-%m-%d %H:%M:%S"),
+      if(!is.null(analysis$analysisConfig)) analysis$analysisConfig$unitVar else "N/A",
+      if(!is.null(analysis$analysisConfig)) analysis$analysisConfig$timeVar else "N/A",
+      if(!is.null(analysis$analysisConfig)) analysis$analysisConfig$outcomeVar else "N/A",
+      if(!is.null(analysis$analysisConfig) && !is.null(analysis$analysisConfig$predictorVars)) {
+        paste(analysis$analysisConfig$predictorVars, collapse = ", ")
+      } else {
+        "None"
+      }
+    )
+
+    summary_text
+  })
+
+  # Load selected analysis button
+  observeEvent(input$loadSelectedAnalysis, {
+    req(input$historyTable_rows_selected)
+    selected_row <- input$historyTable_rows_selected
+    req(selected_row <= length(values$analysis_history))
+
+    selected_analysis <- values$analysis_history[[selected_row]]
+    analysis_id <- selected_analysis$analysisId
+
+    showNotification("Loading analysis results...", type = "message", duration = NULL, id = "load_analysis")
+    session$sendCustomMessage("loadAnalysisResults", list(analysisId = analysis_id))
+  })
+
+  # Handle loaded analysis data
+  observeEvent(input$loaded_analysis_data, {
+    req(input$loaded_analysis_data)
+    loaded_analysis <- input$loaded_analysis_data
+
+    tryCatch({
+      # Restore the analysis results
+      values$analysis_results <- loaded_analysis$analysisResults
+      values$analysis_completed <- TRUE
+
+      # Also restore configuration if available
+      if(!is.null(loaded_analysis$analysisConfig)) {
+        config <- loaded_analysis$analysisConfig
+
+        # Update inputs to match the loaded analysis
+        if(!is.null(config$unitVar)) {
+          updateSelectInput(session, "unitVar", selected = config$unitVar)
+        }
+        if(!is.null(config$timeVar)) {
+          updateSelectInput(session, "timeVar", selected = config$timeVar)
+        }
+        if(!is.null(config$outcomeVar)) {
+          updateSelectInput(session, "outcomeVar", selected = config$outcomeVar)
+        }
+        if(!is.null(config$treatedUnit)) {
+          updateSelectInput(session, "treatedUnit", selected = loaded_analysis$treatedUnit)
+        }
+        if(!is.null(config$treatmentYear)) {
+          updateNumericInput(session, "treatmentYear", value = loaded_analysis$treatmentYear)
+        }
+        if(!is.null(config$predictorVars)) {
+          updateCheckboxGroupInput(session, "predictorVars", selected = config$predictorVars)
+        }
+        if(!is.null(config$special_predictors)) {
+          values$special_predictors <- config$special_predictors
+        }
+      }
+
+      removeNotification("load_analysis")
+      showNotification(
+        HTML(paste0(
+          icon("check-circle"),
+          " Analysis loaded successfully! View results in the Results tab."
+        )),
+        type = "message",
+        duration = 5
+      )
+
+    }, error = function(e) {
+      removeNotification("load_analysis")
+      showNotification(paste("Error loading analysis:", e$message), type = "error", duration = 5)
+    })
+  })
+
+  # Delete selected analysis button
+  observeEvent(input$deleteSelected, {
+    req(input$historyTable_rows_selected)
+    selected_row <- input$historyTable_rows_selected
+    req(selected_row <= length(values$analysis_history))
+
+    selected_analysis <- values$analysis_history[[selected_row]]
+    analysis_id <- selected_analysis$analysisId
+
+    session$sendCustomMessage("deleteAnalysis", list(analysisId = analysis_id))
+    values$show_analysis_summary <- FALSE
+    showNotification("Analysis deleted!", type = "warning", duration = 3)
+  })
+
+  # Auto-load history when the history tab is accessed
+  observeEvent(input$sidebar, {
+    if(!is.null(input$sidebar) && input$sidebar == "history") {
+      session$sendCustomMessage("getAllAnalyses", list())
+    }
+  }, ignoreInit = TRUE)
+
   # Download handlers
   output$downloadResults <- downloadHandler(
     filename = function() {
@@ -1757,11 +2414,251 @@ server <- function(input, output, session) {
     content = function(file) {
       req(values$analysis_results)
 
-      # Create a temporary RMarkdown file for the report
-      tempReport <- file.path(tempdir(), "report.Rmd")
+      # Create temporary directory for plots
+      tempDir <- tempdir()
+      tempReport <- file.path(tempDir, "report.Rmd")
 
-      # Copy the report template (we'll create a simple one)
-      report_content <- sprintf('
+      # Generate plots and save them temporarily
+      tryCatch({
+        showNotification("Generating plots for PDF...", type = "message", duration = NULL, id = "pdf_plots")
+
+        # Generate main plots with error handling
+        p1 <- plot_actual_vs_synthetic(
+          values$analysis_results$outcome_path,
+          values$analysis_results$treatment_year,
+          values$analysis_results$treated_unit
+        )
+        main_plot_path <- file.path(tempDir, "main_plot.png")
+        ggsave(main_plot_path, plot = p1, width = 10, height = 6, dpi = 300, device = "png")
+
+        if(!file.exists(main_plot_path)) {
+          stop("Failed to save main plot")
+        }
+
+        p2 <- plot_treatment_gap(
+          values$analysis_results$outcome_path,
+          values$analysis_results$treatment_year
+        )
+        gap_plot_path <- file.path(tempDir, "gap_plot.png")
+        ggsave(gap_plot_path, plot = p2, width = 10, height = 6, dpi = 300, device = "png")
+
+        if(!file.exists(gap_plot_path)) {
+          stop("Failed to save gap plot")
+        }
+
+        p3 <- plot_donor_weights(values$analysis_results$weights)
+        weights_plot_path <- file.path(tempDir, "weights_plot.png")
+        ggsave(weights_plot_path, plot = p3, width = 8, height = 6, dpi = 300, device = "png")
+
+        if(!file.exists(weights_plot_path)) {
+          stop("Failed to save weights plot")
+        }
+
+        removeNotification("pdf_plots")
+
+        # Include placebo plots if available
+        placebo_plot_section <- ""
+        if(values$placebo_completed && !is.null(values$placebo_results)) {
+          p_placebo <- plot_placebo_gaps(values$placebo_results$placebo_gaps, input$treatmentYear)
+          placebo_plot_path <- file.path(tempDir, "placebo_plot.png")
+          ggsave(placebo_plot_path, plot = p_placebo, width = 10, height = 6, dpi = 300)
+
+          placebo_plot_section <- sprintf('
+## Placebo Tests
+
+```{r echo=FALSE, fig.height=4}
+knitr::include_graphics("%s")
+```
+
+**P-value (Rank):** %.3f
+
+The placebo test evaluates whether the observed treatment effect is unusually large compared to what we would expect by chance. The red line shows the actual treated unit, while gray lines show the effects when we artificially assign treatment to donor units.
+
+', placebo_plot_path, values$placebo_results$ranking)
+        }
+
+        # Safely extract values and convert to appropriate types
+        treated_unit <- as.character(values$analysis_results$treated_unit)
+        treatment_year <- as.character(values$analysis_results$treatment_year)
+        num_donors <- length(values$analysis_results$donor_units)
+        rmspe <- as.numeric(values$analysis_results$rmspe)
+        converged <- ifelse(values$analysis_results$converged, "Yes", "No")
+
+        # Calculate average treatment effect safely
+        post_treatment_data <- values$analysis_results$outcome_path[values$analysis_results$outcome_path$post_treatment, ]
+        avg_treatment_effect <- mean(post_treatment_data$gap, na.rm = TRUE)
+
+        # Calculate balance info safely
+        pre_treatment_data <- values$analysis_results$outcome_path[!values$analysis_results$outcome_path$post_treatment, ]
+        treated_mean <- mean(pre_treatment_data$treated_outcome, na.rm = TRUE)
+        synthetic_mean <- mean(pre_treatment_data$synthetic_outcome, na.rm = TRUE)
+        balance_diff <- mean(pre_treatment_data$gap, na.rm = TRUE)
+
+        # Statistical inference text
+        stat_inference <- if(values$placebo_completed) {
+          sprintf("Placebo test p-value: %.3f", values$placebo_results$ranking)
+        } else {
+          "Run placebo tests for statistical inference"
+        }
+
+        # Create comprehensive report content
+        report_content <- sprintf('
+---
+title: "Synthetic Control Analysis Report"
+date: "%s"
+output:
+  pdf_document:
+    fig_caption: yes
+geometry: margin=1in
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(knitr)
+library(ggplot2)
+```
+
+# Executive Summary
+
+This report presents results from a synthetic control analysis examining the impact of an intervention on **%s** starting in **%s**. The synthetic control method creates a weighted combination of similar control units to approximate what would have happened to the treated unit in the absence of the intervention.
+
+# Analysis Configuration
+
+- **Treated Unit:** %s
+- **Treatment Year:** %s
+- **Number of Donor Units:** %d
+- **Pre-treatment RMSPE:** %.4f
+- **Analysis Converged:** %s
+
+# Results
+
+## Outcome Trajectory
+
+The following plot compares the actual outcome trajectory for the treated unit with its synthetic counterpart:
+
+```{r echo=FALSE, fig.height=4, fig.cap="Actual vs Synthetic Outcome"}
+knitr::include_graphics("%s")
+```
+
+## Treatment Effect
+
+The treatment effect (gap between actual and synthetic) over time:
+
+```{r echo=FALSE, fig.height=4, fig.cap="Treatment Effect Over Time"}
+knitr::include_graphics("%s")
+```
+
+**Average Post-treatment Effect:** %.3f
+
+## Donor Unit Composition
+
+The synthetic control is constructed using the following donor unit weights:
+
+```{r echo=FALSE, fig.height=4, fig.cap="Donor Unit Weights"}
+knitr::include_graphics("%s")
+```
+
+### Donor Weights Table
+
+```{r echo=FALSE}
+weights_df <- data.frame(
+  Unit = c(%s),
+  Weight = round(c(%s), 4),
+  stringsAsFactors = FALSE
+)
+weights_df <- weights_df[weights_df$Weight > 0, ]
+weights_df <- weights_df[order(weights_df$Weight, decreasing = TRUE), ]
+kable(weights_df, caption = "Donor Unit Weights (non-zero only)")
+```
+
+## Predictor Balance
+
+The pre-treatment balance between treated and synthetic units:
+
+```{r echo=FALSE}
+balance_df <- data.frame(
+  Predictor = "Outcome Variable",
+  Treated = %.3f,
+  Synthetic = %.3f,
+  Difference = %.3f,
+  stringsAsFactors = FALSE
+)
+kable(balance_df, caption = "Pre-treatment Predictor Balance")
+```
+
+%s
+
+# Interpretation
+
+The synthetic control method provides a transparent way to evaluate policy interventions by constructing a data-driven counterfactual. Key considerations:
+
+- **Pre-treatment Fit:** Lower RMSPE indicates better pre-treatment fit (current: %.4f)
+- **Treatment Effect:** The gap shows the estimated impact of the intervention
+- **Statistical Inference:** %s
+
+# Technical Notes
+
+- Analysis conducted using the Synth R package
+- Weights determined through optimization to minimize pre-treatment prediction error
+- Results should be interpreted alongside domain knowledge and institutional context
+
+*Report generated on %s using Synthetic Control Shiny App*
+
+',
+          # Header info
+          Sys.Date(),
+          treated_unit,
+          treatment_year,
+
+          # Configuration
+          treated_unit,
+          treatment_year,
+          num_donors,
+          rmspe,
+          converged,
+
+          # Plot paths
+          main_plot_path,
+          gap_plot_path,
+          weights_plot_path,
+
+          # Treatment effect
+          avg_treatment_effect,
+
+          # Weights table
+          paste('"', names(values$analysis_results$weights), '"', collapse = ", "),
+          paste(round(values$analysis_results$weights, 4), collapse = ", "),
+
+          # Balance info
+          treated_mean,
+          synthetic_mean,
+          balance_diff,
+
+          # Placebo section
+          placebo_plot_section,
+
+          # Footer info
+          rmspe,
+          stat_inference,
+          Sys.Date()
+        )
+
+        writeLines(report_content, tempReport)
+
+        # Render the report
+        rmarkdown::render(tempReport, output_file = file,
+                         envir = new.env(), quiet = TRUE)
+
+        # Clean up temporary plot files (optional - temp dir will be cleaned automatically)
+        unlink(c(main_plot_path, gap_plot_path, weights_plot_path))
+        if(values$placebo_completed) {
+          placebo_plot_path <- file.path(tempDir, "placebo_plot.png")
+          unlink(placebo_plot_path)
+        }
+
+      }, error = function(e) {
+        # Fallback to simple report if plot generation fails
+        simple_content <- sprintf('
 ---
 title: "Synthetic Control Analysis Report"
 date: "%s"
@@ -1770,44 +2667,26 @@ output: pdf_document
 
 # Analysis Summary
 
+**Error:** Could not generate plots for report: %s
+
 **Treated Unit:** %s
 **Treatment Year:** %s
 **RMSPE:** %.3f
-**Converged:** %s
 
-# Results
+Please check the console for errors and try again.
 
-## Donor Unit Weights
-
-```{r echo=FALSE, results="asis"}
-library(knitr)
-weights_df <- data.frame(
-  Unit = c(%s),
-  Weight = c(%s)
-)
-kable(weights_df)
-```
-
-## Treatment Effects
-
-Average post-treatment effect: %.2f
-
-*Report generated automatically by Synthetic Control Shiny App*
+*Report generated by Synthetic Control Shiny App*
 ',
-        Sys.Date(),
-        values$analysis_results$treated_unit,
-        values$analysis_results$treatment_year,
-        values$analysis_results$rmspe,
-        values$analysis_results$converged,
-        paste('"', names(values$analysis_results$weights), '"', collapse = ", "),
-        paste(round(values$analysis_results$weights, 3), collapse = ", "),
-        mean(values$analysis_results$outcome_path[values$analysis_results$outcome_path$post_treatment, "gap"], na.rm = TRUE)
-      )
+          Sys.Date(),
+          e$message,
+          values$analysis_results$treated_unit,
+          values$analysis_results$treatment_year,
+          values$analysis_results$rmspe
+        )
 
-      writeLines(report_content, tempReport)
-
-      # Render the report
-      rmarkdown::render(tempReport, output_file = file, envir = new.env())
+        writeLines(simple_content, tempReport)
+        rmarkdown::render(tempReport, output_file = file, envir = new.env(), quiet = TRUE)
+      })
     }
   )
 
