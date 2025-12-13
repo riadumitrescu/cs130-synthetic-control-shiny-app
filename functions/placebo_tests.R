@@ -18,11 +18,15 @@ library(ggplot2)
 #' @param outcome_var Name of outcome variable column
 #' @param predictor_vars Vector of predictor variable names
 #' @param special_predictors_config List of special predictor configs
+#' @param time_predictors_prior Optional: custom range for time.predictors.prior
+#' @param time_optimize_ssr Optional: custom range for time.optimize.ssr
+#' @param time_plot Optional: custom range for time.plot
 #' @return List with time, Y_treated, Y_synth, gap, and metadata
 synth_runner <- function(data, treated_unit_id, treat_time_point,
                         pre_periods, post_periods, donor_pool,
                         unit_var, time_var, outcome_var,
-                        predictor_vars = NULL, special_predictors_config = NULL) {
+                        predictor_vars = NULL, special_predictors_config = NULL,
+                        time_predictors_prior = NULL, time_optimize_ssr = NULL, time_plot = NULL) {
 
   tryCatch({
     # Filter data to only include relevant units and time periods
@@ -43,7 +47,10 @@ synth_runner <- function(data, treated_unit_id, treat_time_point,
       treated_unit = treated_unit_id,
       treatment_year = treat_time_point,
       predictor_vars = predictor_vars,
-      special_predictors_config = special_predictors_config
+      special_predictors_config = special_predictors_config,
+      time_predictors_prior = time_predictors_prior,
+      time_optimize_ssr = time_optimize_ssr,
+      time_plot = time_plot
     )
 
     # Extract outcome paths
@@ -93,12 +100,16 @@ synth_runner <- function(data, treated_unit_id, treat_time_point,
 #' @param predictor_vars Vector of predictor variable names
 #' @param special_predictors_config List of special predictor configs
 #' @param exclude_treated_from_donor Whether to exclude real treated unit from donor pools in placebos
+#' @param time_predictors_prior Optional: custom range for time.predictors.prior
+#' @param time_optimize_ssr Optional: custom range for time.optimize.ssr
+#' @param time_plot Optional: custom range for time.plot
 #' @return List with gap_df (long format gaps) and summary_df (unit-level summaries)
 in_space_placebo <- function(data, outcome_var, unit_var, time_var,
                             treated_unit, treat_time,
                             donor_units = NULL, pre_period = NULL, post_period = NULL,
                             predictor_vars = NULL, special_predictors_config = NULL,
-                            exclude_treated_from_donor = TRUE) {
+                            exclude_treated_from_donor = TRUE,
+                            time_predictors_prior = NULL, time_optimize_ssr = NULL, time_plot = NULL) {
 
   # Data validation
   if(!all(c(unit_var, time_var, outcome_var) %in% names(data))) {
@@ -149,7 +160,10 @@ in_space_placebo <- function(data, outcome_var, unit_var, time_var,
     time_var = time_var,
     outcome_var = outcome_var,
     predictor_vars = predictor_vars,
-    special_predictors_config = special_predictors_config
+    special_predictors_config = special_predictors_config,
+    time_predictors_prior = time_predictors_prior,
+    time_optimize_ssr = time_optimize_ssr,
+    time_plot = time_plot
   )
 
   if(length(res_treated$time) == 0) {
@@ -211,7 +225,10 @@ in_space_placebo <- function(data, outcome_var, unit_var, time_var,
       time_var = time_var,
       outcome_var = outcome_var,
       predictor_vars = predictor_vars,
-      special_predictors_config = special_predictors_config
+      special_predictors_config = special_predictors_config,
+      time_predictors_prior = time_predictors_prior,
+      time_optimize_ssr = time_optimize_ssr,
+      time_plot = time_plot
     )
 
     if(length(res_u$time) == 0 || !is.null(res_u$error)) {
@@ -388,6 +405,8 @@ in_time_placebo <- function(data, outcome_var, unit_var, time_var,
     message(paste("  Pre-periods:", length(pre_period_fake), "Post-periods:", length(post_period_fake)))
 
     # Run synthetic control with fake treatment time
+    # Note: For in-time placebo, we don't use custom time parameters
+    # because they were set for the real treatment time, not fake times
     res_fake <- synth_runner(
       data = data,
       treated_unit_id = treated_unit,
@@ -399,7 +418,10 @@ in_time_placebo <- function(data, outcome_var, unit_var, time_var,
       time_var = time_var,
       outcome_var = outcome_var,
       predictor_vars = predictor_vars,
-      special_predictors_config = special_predictors_config
+      special_predictors_config = special_predictors_config,
+      time_predictors_prior = NULL,  # Use defaults for fake treatment time
+      time_optimize_ssr = NULL,      # Use defaults for fake treatment time
+      time_plot = NULL               # Use defaults for fake treatment time
     )
 
     if(length(res_fake$time) == 0 || !is.null(res_fake$error)) {
