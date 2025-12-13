@@ -11,7 +11,7 @@ library(dplyr)
 library(tidyr)
 library(shinydashboard)
 library(Synth)  # Official synthetic control package
-library(rmarkdown)  # For PDF report generation
+library(zip)  # For creating ZIP files
 
 # Source helper functions
 source("functions/data_functions.R")
@@ -22,37 +22,7 @@ source("functions/placebo_tests.R")
 # Define UI
 ui <- dashboardPage(
   dashboardHeader(
-    title = "Synthetic Control Analysis",
-    tags$li(
-      class = "dropdown",
-      style = "padding: 8px 15px;",
-      actionButton("saveParamsBtn", 
-                   "💾 Save Parameters", 
-                   class = "btn-success",
-                   style = "color: white; font-weight: bold; padding: 8px 16px; font-size: 14px;",
-                   icon = icon("save")),
-      tags$script(HTML("
-        $(document).ready(function() {
-          $('#saveParamsBtn').css({
-            'background-color': '#28a745',
-            'border-color': '#28a745',
-            'margin-top': '8px',
-            'box-shadow': '0 2px 4px rgba(0,0,0,0.2)'
-          }).hover(function() {
-            $(this).css('background-color', '#218838');
-          }, function() {
-            $(this).css('background-color', '#28a745');
-          }).click(function() {
-            var btn = $(this);
-            var originalText = btn.html();
-            btn.html('<i class=\"fa fa-spinner fa-spin\"></i> Saving...').prop('disabled', true);
-            setTimeout(function() {
-              btn.html(originalText).prop('disabled', false);
-            }, 1000);
-          });
-        });
-      "))
-    )
+    title = "Synthetic Control Analysis"
   ),
 
   dashboardSidebar(
@@ -295,6 +265,8 @@ ui <- dashboardPage(
 
           // Save analysis results to IndexedDB
           window.saveAnalysisResults = function(analysisData) {
+            console.log('saveAnalysisResults called with:', analysisData);
+
             initDB().then(function(db) {
               const transaction = db.transaction([ANALYSIS_STORE_NAME], 'readwrite');
               const store = transaction.objectStore(ANALYSIS_STORE_NAME);
@@ -306,22 +278,39 @@ ui <- dashboardPage(
                 treatmentYear: analysisData.treatmentYear,
                 analysisResults: analysisData.analysisResults,
                 analysisConfig: analysisData.analysisConfig,
+                inSpacePlacebo: analysisData.inSpacePlacebo || null,
+                inTimePlacebo: analysisData.inTimePlacebo || null,
                 savedAt: new Date().toISOString(),
                 rmspe: analysisData.rmspe,
                 converged: analysisData.converged
               };
 
+              console.log('Saving to IndexedDB:', {
+                id: data.analysisId,
+                fileName: data.fileName,
+                treatedUnit: data.treatedUnit,
+                hasResults: !!data.analysisResults,
+                hasConfig: !!data.analysisConfig
+              });
+
               const request = store.put(data);
 
               request.onsuccess = function() {
-                console.log('Analysis results saved successfully:', data.analysisId);
+                console.log('Analysis saved successfully:', data.analysisId);
+                // Refresh history
+                setTimeout(function() {
+                  getAllAnalyses().then(function(analyses) {
+                    console.log('Refreshing history after save, count:', analyses.length);
+                    Shiny.setInputValue('analysis_history_data', analyses, {priority: 'event'});
+                  });
+                }, 100);
               };
 
               request.onerror = function() {
-                console.error('Error saving analysis results:', request.error);
+                console.error('Error saving analysis:', request.error);
               };
             }).catch(function(error) {
-              console.error('Failed to save analysis results:', error);
+              console.error('Failed to save analysis:', error);
             });
           };
 
@@ -785,12 +774,12 @@ ui <- dashboardPage(
             # In-Time Placebo Tests
             box(
               title = "In-Time Placebo Tests", status = "info", solidHeader = TRUE, width = 6,
-              p("Tests whether similar effects occur at fake treatment dates."),
+              p("Tests whether similar effects occur at a fake treatment date."),
               p(strong("Method:"), "Pretend treatment happened earlier, when no intervention actually occurred."),
 
-              numericInput("numFakeTimes", "Number of Fake Treatment Times:",
-                          value = 3, min = 1, max = 10, step = 1),
-              p("Fake times will be evenly spaced before the real treatment.",
+              numericInput("fakeTreatmentYear", "Fake Treatment Year:",
+                          value = NULL, min = 1900, max = 2100, step = 1),
+              p("Select a year before the real treatment year.",
                 style = "font-size: 12px; color: #6c757d;"),
               br(),
               actionButton("runInTimePlacebo", "Run In-Time Placebo",
@@ -809,13 +798,20 @@ ui <- dashboardPage(
             condition = "output.inSpacePlaceboCompleted",
             fluidRow(
               box(
-                title = "In-Space Results", status = "primary", solidHeader = TRUE, width = 12,
+                title = "In-Space Results: Gap Plot", status = "primary", solidHeader = TRUE, width = 6,
+                plotOutput("inSpacePlaceboPlot", height = "350px")
+              ),
+              box(
+                title = "In-Space Results: RMSPE Ratio Distribution", status = "primary", solidHeader = TRUE, width = 6,
+                plotOutput("inSpaceRMSPEHistogram", height = "350px")
+              )
+            ),
+            fluidRow(
+              box(
+                title = "In-Space Summary Statistics", status = "primary", solidHeader = TRUE, width = 12,
                 fluidRow(
                   column(4,
                     valueBoxOutput("inSpacePValueBox", width = 12)
-                  ),
-                  column(8,
-                    plotOutput("inSpacePlaceboPlot", height = "350px")
                   )
                 ),
                 br(),
@@ -829,33 +825,18 @@ ui <- dashboardPage(
             condition = "output.inTimePlaceboCompleted",
             fluidRow(
               box(
-                title = "In-Time Results", status = "info", solidHeader = TRUE, width = 12,
-                fluidRow(
-                  column(6,
-                    plotOutput("inTimePlaceboPlot", height = "350px")
-                  ),
-                  column(6,
-                    DT::dataTableOutput("inTimePlaceboTable")
-                  )
-                )
+                title = "In-Time Results: Outcome Paths", status = "info", solidHeader = TRUE, width = 6,
+                plotOutput("inTimePlaceboPathPlot", height = "350px")
+              ),
+              box(
+                title = "In-Time Results: Gap Plot", status = "info", solidHeader = TRUE, width = 6,
+                plotOutput("inTimePlaceboPlot", height = "350px")
               )
-            )
-          ),
-
-          # Legacy Placebo (Original Implementation)
-          fluidRow(
-            box(
-              title = "Legacy Placebo Test", status = "warning", solidHeader = TRUE, width = 12,
-              collapsible = TRUE, collapsed = TRUE,
-              p("Original placebo implementation (same as in-space but different interface)."),
-              actionButton("runPlacebo", "Run Legacy Placebo Tests",
-                          class = "btn-warning btn-sm", icon = icon("flask")),
-              conditionalPanel(
-                condition = "output.placeboCompleted",
-                hr(),
-                valueBoxOutput("placeboRankBox", width = 3),
-                plotOutput("placeboPlot", height = "300px"),
-                DT::dataTableOutput("placeboTable")
+            ),
+            fluidRow(
+              box(
+                title = "In-Time Summary Statistics", status = "info", solidHeader = TRUE, width = 12,
+                DT::dataTableOutput("inTimePlaceboTable")
               )
             )
           )
@@ -880,6 +861,25 @@ ui <- dashboardPage(
 
           fluidRow(
             box(
+              title = "Save Analysis", status = "success", solidHeader = TRUE, width = 12,
+              h4("Save Current Analysis to History"),
+              p("Save this analysis with a custom name for future reference."),
+              fluidRow(
+                column(8,
+                  textInput("analysisName", "Analysis Name:",
+                           placeholder = "e.g., California Prop 99 Analysis")
+                ),
+                column(4,
+                  actionButton("saveAnalysis", "Save to History",
+                             class = "btn-success btn-lg", style = "width: 100%; margin-top: 25px;",
+                             icon = icon("save"))
+                )
+              )
+            )
+          ),
+
+          fluidRow(
+            box(
               title = "Export Data", status = "primary", solidHeader = TRUE, width = 6,
               h4("Download Data Tables"),
               downloadButton("downloadResults", "Download Results (CSV)",
@@ -887,50 +887,47 @@ ui <- dashboardPage(
               downloadButton("downloadWeights", "Download Weights (CSV)",
                            class = "btn-info", style = "margin-bottom: 10px; width: 100%;"),
               downloadButton("downloadBalance", "Download Balance Table (CSV)",
-                           class = "btn-warning", style = "width: 100%;")
+                           class = "btn-warning", style = "margin-bottom: 10px; width: 100%;"),
+              hr(),
+              downloadButton("downloadAllData", "Download All Data (ZIP)",
+                           class = "btn-primary btn-lg", style = "width: 100%;",
+                           icon = icon("download"))
             ),
 
             box(
               title = "Export Plots", status = "info", solidHeader = TRUE, width = 6,
-              h4("Download Visualizations"),
+              h4("Main Analysis Plots"),
               downloadButton("downloadMainPlot", "Download Main Plot (PNG)",
                            class = "btn-success", style = "margin-bottom: 10px; width: 100%;"),
               downloadButton("downloadGapPlot", "Download Gap Plot (PNG)",
                            class = "btn-info", style = "margin-bottom: 10px; width: 100%;"),
               downloadButton("downloadWeightsPlot", "Download Weights Chart (PNG)",
-                           class = "btn-warning", style = "width: 100%;")
-            )
-          ),
-
-          fluidRow(
-            box(
-              title = "PDF Report", status = "success", solidHeader = TRUE, width = 12,
-              p("Generate a comprehensive PDF report with all results, plots, and analysis summary."),
-
-              fluidRow(
-                column(6,
-                  actionButton("previewReport", "Preview Report",
-                             class = "btn-info btn-lg", style = "width: 100%; margin-bottom: 10px;",
-                             icon = icon("eye"))
-                ),
-                column(6,
-                  downloadButton("downloadReport", "Generate PDF Report",
-                               class = "btn-success btn-lg", style = "width: 100%; margin-bottom: 10px;",
-                               icon = icon("file-pdf"))
-                )
-              ),
+                           class = "btn-warning", style = "margin-bottom: 10px; width: 100%;"),
 
               conditionalPanel(
-                condition = "output.reportPreviewAvailable",
+                condition = "output.inSpacePlaceboCompleted || output.inTimePlaceboCompleted",
                 hr(),
-                h4("Report Preview", style = "color: #2c3e50;"),
-                div(style = "max-height: 400px; overflow-y: auto; border: 1px solid #ddd; padding: 15px; background-color: #f8f9fa;",
-                    verbatimTextOutput("reportPreview")
+                h4("Placebo Test Plots"),
+                conditionalPanel(
+                  condition = "output.inSpacePlaceboCompleted",
+                  downloadButton("downloadInSpaceGapPlot", "In-Space Gap Plot (PNG)",
+                               class = "btn-success", style = "margin-bottom: 10px; width: 100%;"),
+                  downloadButton("downloadInSpaceRMSPEPlot", "In-Space RMSPE Histogram (PNG)",
+                               class = "btn-info", style = "margin-bottom: 10px; width: 100%;")
+                ),
+                conditionalPanel(
+                  condition = "output.inTimePlaceboCompleted",
+                  downloadButton("downloadInTimePathPlot", "In-Time Path Plot (PNG)",
+                               class = "btn-success", style = "margin-bottom: 10px; width: 100%;"),
+                  downloadButton("downloadInTimeGapPlot", "In-Time Gap Plot (PNG)",
+                               class = "btn-info", style = "margin-bottom: 10px; width: 100%;")
                 )
               ),
 
-              br(),
-              div(id = "reportStatus", style = "margin-top: 15px;")
+              hr(),
+              downloadButton("downloadAllPlots", "Download All Plots (ZIP)",
+                           class = "btn-primary btn-lg", style = "width: 100%;",
+                           icon = icon("download"))
             )
           )
         ),
@@ -952,7 +949,7 @@ ui <- dashboardPage(
         fluidRow(
           box(
             title = "Analysis History", status = "primary", solidHeader = TRUE, width = 12,
-            p("View and manage your saved analysis results. Each analysis is automatically saved when completed."),
+            p("View and manage your saved analysis results. Use the 'Save to History' button in the Export tab to save analyses."),
 
             fluidRow(
               column(8,
@@ -1080,21 +1077,6 @@ server <- function(input, output, session) {
     return(TRUE)
   }
   
-  # Manual save button handler
-  observeEvent(input$saveParamsBtn, {
-    if(saveCurrentSettings()) {
-      showNotification(
-        HTML(paste0(
-          icon("check-circle"), 
-          " Parameters saved successfully for: <strong>", 
-          values$current_file_name, 
-          "</strong>"
-        )), 
-        type = "message", 
-        duration = 4
-      )
-    }
-  })
 
   # File upload handling
   observeEvent(input$file, {
@@ -1387,12 +1369,6 @@ server <- function(input, output, session) {
   })
   outputOptions(output, "analysisCompleted", suspendWhenHidden = FALSE)
 
-  # Check if placebo tests are completed
-  output$placeboCompleted <- reactive({
-    return(values$placebo_completed)
-  })
-  outputOptions(output, "placeboCompleted", suspendWhenHidden = FALSE)
-
   # Check if in-space placebo tests are completed
   output$inSpacePlaceboCompleted <- reactive({
     return(values$in_space_placebo_completed)
@@ -1412,10 +1388,6 @@ server <- function(input, output, session) {
   outputOptions(output, "settingsRestored", suspendWhenHidden = FALSE)
 
   # Check if report preview is available
-  output$reportPreviewAvailable <- reactive({
-    return(values$report_preview_available)
-  })
-  outputOptions(output, "reportPreviewAvailable", suspendWhenHidden = FALSE)
 
   # Check if analysis history data is available
   output$hasHistoryData <- reactive({
@@ -1729,39 +1701,9 @@ server <- function(input, output, session) {
 
       values$analysis_completed <- TRUE
 
-      # Save analysis results to IndexedDB
-      tryCatch({
-        analysis_id <- paste0(
-          gsub("[^A-Za-z0-9]", "_", input$treatedUnit), "_",
-          input$treatmentYear, "_",
-          format(Sys.time(), "%Y%m%d_%H%M%S")
-        )
-
-        analysis_data <- list(
-          analysisId = analysis_id,
-          fileName = if(!is.null(values$current_file_name)) values$current_file_name else "unknown_file",
-          treatedUnit = input$treatedUnit,
-          treatmentYear = input$treatmentYear,
-          analysisResults = values$analysis_results,
-          analysisConfig = list(
-            unitVar = input$unitVar,
-            timeVar = input$timeVar,
-            outcomeVar = input$outcomeVar,
-            predictorVars = input$predictorVars,
-            special_predictors = values$special_predictors
-          ),
-          rmspe = values$analysis_results$rmspe,
-          converged = values$analysis_results$converged
-        )
-
-        session$sendCustomMessage("saveAnalysisResults", list(analysisData = analysis_data))
-      }, error = function(e) {
-        cat("Error saving analysis results:", e$message, "\n")
-      })
-
       # Remove progress notification and show success
       removeNotification("analysis_progress")
-      showNotification("Analysis completed and saved successfully!", type = "message", duration = 3)
+      showNotification("Analysis completed successfully! Use the Export tab to save to history.", type = "message", duration = 3)
 
     }, error = function(e) {
       removeNotification("analysis_progress")
@@ -1863,277 +1805,7 @@ server <- function(input, output, session) {
                   class = "compact stripe")
   })
 
-  # Placebo test analysis
-  observeEvent(input$runPlacebo, {
-    req(values$analysis_results, input$unitVar, input$timeVar, input$outcomeVar,
-        input$treatedUnit, input$treatmentYear)
-
-    # Reset state
-    values$placebo_results <- NULL
-    values$placebo_completed <- FALSE
-
-    tryCatch({
-      # Count total units for progress
-      all_units <- unique(values$data[[input$unitVar]])
-      total_units <- length(all_units)
-      
-      showNotification(
-        HTML(paste0(
-          icon("spinner", class = "fa-spin"), 
-          " Running placebo tests (0/", total_units, " units)..."
-        )), 
-        type = "message", 
-        duration = NULL, 
-        id = "placebo_progress"
-      )
-
-      # Use same predictor config as main analysis
-      predictor_vars <- input$predictorVars
-      if(is.null(predictor_vars) || length(predictor_vars) == 0) {
-        predictor_vars <- NULL
-      }
-      
-      special_predictors_config <- NULL
-      if(length(values$special_predictors) > 0) {
-        special_predictors_config <- values$special_predictors
-      }
-
-      # Run placebo tests with progress updates
-      cat("Starting placebo tests for", total_units, "units...\n")
-      
-      # Run placebo tests using Synth package
-      values$placebo_results <- run_synth_placebo(
-        data = values$data,
-        unit_var = input$unitVar,
-        time_var = input$timeVar,
-        outcome_var = input$outcomeVar,
-        treated_unit = input$treatedUnit,
-        treatment_year = input$treatmentYear,
-        predictor_vars = predictor_vars,
-        special_predictors_config = special_predictors_config
-      )
-
-      # Check if we got results
-      if(is.null(values$placebo_results)) {
-        stop("Placebo tests returned NULL - no results generated")
-      }
-      
-      if(is.null(values$placebo_results$placebo_gaps) || 
-         nrow(values$placebo_results$placebo_gaps) == 0) {
-        stop("Placebo tests completed but no gap data was generated. Check that units have sufficient data.")
-      }
-
-      values$placebo_completed <- TRUE
-      
-      successful_units <- if(!is.null(values$placebo_results$placebo_gaps)) {
-        length(unique(values$placebo_results$placebo_gaps$unit))
-      } else {
-        0
-      }
-
-      removeNotification("placebo_progress")
-      showNotification(
-        HTML(paste0(
-          icon("check-circle"), 
-          " Placebo tests completed! (", successful_units, "/", total_units, " units successful)"
-        )), 
-        type = "message", 
-        duration = 5
-      )
-      
-      cat("Placebo tests completed successfully:", successful_units, "units\n")
-
-    }, error = function(e) {
-      removeNotification("placebo_progress")
-      error_msg <- paste("Placebo tests failed:", e$message)
-      cat("ERROR:", error_msg, "\n")
-      showNotification(
-        HTML(paste0(icon("exclamation-triangle"), " ", error_msg)), 
-        type = "error", 
-        duration = 8
-      )
-      values$placebo_completed <- FALSE
-      values$placebo_results <- NULL
-    })
-  })
-
-  # Placebo results
-  output$placeboRankBox <- renderValueBox({
-    valueBox(
-      value = if(!is.null(values$placebo_results) && !is.na(values$placebo_results$ranking)) {
-        paste0(round(values$placebo_results$ranking * 100, 1), "%")
-      } else {
-        "N/A"
-      },
-      subtitle = "P-value (Rank)",
-      icon = icon("percentage"),
-      color = "orange"
-    )
-  })
-
-  output$placeboPlot <- renderPlot({
-    req(values$placebo_results)
-    plot_placebo_gaps(values$placebo_results$placebo_gaps, input$treatmentYear)
-  })
-
-  output$placeboTable <- DT::renderDataTable({
-    req(values$placebo_results)
-
-    # Create summary table with safe filtering
-    req(values$placebo_results$placebo_gaps)
-
-    # Use bulletproof filtering
-    all_gaps <- values$placebo_results$placebo_gaps
-    post_idx <- which(all_gaps$time >= input$treatmentYear)
-
-    if(length(post_idx) > 0) {
-      post_gaps <- all_gaps[post_idx, ]
-
-      # Manual aggregation to avoid issues
-      units <- unique(post_gaps$unit)
-      summary_list <- list()
-
-      for(u in units) {
-        unit_data <- post_gaps[post_gaps$unit == u, ]
-        summary_list[[u]] <- data.frame(
-          Unit = u,
-          Is_Treated = ifelse(any(unit_data$is_treated), "Yes", "No"),
-          Avg_Effect = round(mean(unit_data$gap, na.rm = TRUE), 3),
-          Max_Effect = round(max(unit_data$gap, na.rm = TRUE), 3),
-          Min_Effect = round(min(unit_data$gap, na.rm = TRUE), 3),
-          stringsAsFactors = FALSE
-        )
-      }
-
-      summary_df <- do.call(rbind, summary_list)
-    } else {
-      summary_df <- data.frame(
-        Unit = character(0),
-        Is_Treated = character(0),
-        Avg_Effect = numeric(0),
-        Max_Effect = numeric(0),
-        Min_Effect = numeric(0),
-        stringsAsFactors = FALSE
-      )
-    }
-
-    DT::datatable(summary_df,
-                  options = list(pageLength = 10),
-                  class = "compact stripe")
-  })
-
   # Report preview handler
-  observeEvent(input$previewReport, {
-    req(values$analysis_results)
-
-    tryCatch({
-      showNotification("Generating report preview...", type = "message", duration = 2, id = "preview_progress")
-
-      # Safely extract values
-      treated_unit <- as.character(values$analysis_results$treated_unit)
-      treatment_year <- as.character(values$analysis_results$treatment_year)
-      num_donors <- length(values$analysis_results$donor_units)
-      rmspe <- as.numeric(values$analysis_results$rmspe)
-      converged <- ifelse(values$analysis_results$converged, "Yes", "No")
-
-      # Calculate metrics
-      post_treatment_data <- values$analysis_results$outcome_path[values$analysis_results$outcome_path$post_treatment, ]
-      avg_treatment_effect <- mean(post_treatment_data$gap, na.rm = TRUE)
-
-      pre_treatment_data <- values$analysis_results$outcome_path[!values$analysis_results$outcome_path$post_treatment, ]
-      treated_mean <- mean(pre_treatment_data$treated_outcome, na.rm = TRUE)
-      synthetic_mean <- mean(pre_treatment_data$synthetic_outcome, na.rm = TRUE)
-
-      # Create weights summary
-      weights_summary <- data.frame(
-        Unit = names(values$analysis_results$weights),
-        Weight = as.numeric(values$analysis_results$weights)
-      ) %>%
-        filter(Weight > 0) %>%
-        arrange(desc(Weight)) %>%
-        head(5)  # Top 5 weights
-
-      weights_text <- paste(sprintf("%s: %.3f", weights_summary$Unit, weights_summary$Weight), collapse = ", ")
-
-      # Statistical inference
-      stat_inference <- if(values$placebo_completed) {
-        sprintf("Placebo test p-value: %.3f", values$placebo_results$ranking)
-      } else {
-        "Run placebo tests for statistical inference"
-      }
-
-      # Create preview text
-      preview_text <- sprintf(
-"SYNTHETIC CONTROL ANALYSIS REPORT
-
-EXECUTIVE SUMMARY
-=================
-Analysis of intervention on %s starting in %s using synthetic control method.
-
-ANALYSIS CONFIGURATION
-======================
-• Treated Unit: %s
-• Treatment Year: %s
-• Number of Donor Units: %d
-• Pre-treatment RMSPE: %.4f
-• Analysis Converged: %s
-
-KEY RESULTS
-===========
-• Average Post-treatment Effect: %.3f
-• Pre-treatment Fit (Treated): %.3f
-• Pre-treatment Fit (Synthetic): %.3f
-
-TOP DONOR WEIGHTS
-=================
-%s
-
-STATISTICAL INFERENCE
-====================
-%s
-
-INTERPRETATION
-==============
-- Pre-treatment RMSPE of %.4f indicates the quality of fit
-- The synthetic control method provides a data-driven counterfactual
-- Treatment effect represents the difference between actual and synthetic outcomes
-
-Note: This is a text preview. The full PDF report includes:
-• High-resolution plots showing actual vs synthetic outcomes
-• Treatment effect visualization over time
-• Donor unit weights bar chart
-• Placebo test results (if available)
-• Detailed tables and technical notes
-
-Generated on %s",
-        treated_unit, treatment_year,
-        treated_unit, treatment_year, num_donors, rmspe, converged,
-        avg_treatment_effect, treated_mean, synthetic_mean,
-        weights_text,
-        stat_inference,
-        rmspe,
-        Sys.Date()
-      )
-
-      values$report_preview <- preview_text
-      values$report_preview_available <- TRUE
-
-      removeNotification("preview_progress")
-      showNotification("Report preview ready!", type = "message", duration = 3)
-
-    }, error = function(e) {
-      removeNotification("preview_progress")
-      values$report_preview <- paste("Error generating preview:", e$message)
-      values$report_preview_available <- TRUE
-      showNotification("Error generating preview", type = "error", duration = 3)
-    })
-  })
-
-  # Report preview output
-  output$reportPreview <- renderText({
-    req(values$report_preview)
-    values$report_preview
-  })
 
   # ============================================
   # ANALYSIS HISTORY HANDLERS
@@ -2142,7 +1814,27 @@ Generated on %s",
   # Handle analysis history data from IndexedDB
   observeEvent(input$analysis_history_data, {
     req(input$analysis_history_data)
-    values$analysis_history <- input$analysis_history_data
+
+    cat("Received analysis_history_data\n")
+    cat("Type:", class(input$analysis_history_data), "\n")
+    cat("Length:", length(input$analysis_history_data), "\n")
+
+    # Check if it's a valid list of analyses
+    if(is.list(input$analysis_history_data) && length(input$analysis_history_data) > 0) {
+      # Check if the first element has the expected structure
+      first_elem <- input$analysis_history_data[[1]]
+      if(is.list(first_elem) && "analysisId" %in% names(first_elem)) {
+        values$analysis_history <- input$analysis_history_data
+        cat("Valid analysis history data received:", length(input$analysis_history_data), "analyses\n")
+      } else {
+        cat("Invalid structure - first element doesn't have expected fields\n")
+        cat("First element names:", names(first_elem), "\n")
+        values$analysis_history <- NULL
+      }
+    } else {
+      cat("Empty or invalid analysis history data\n")
+      values$analysis_history <- NULL
+    }
   })
 
   # Refresh history button
@@ -2158,23 +1850,108 @@ Generated on %s",
     showNotification("All analysis history cleared!", type = "warning", duration = 3)
   })
 
+  # Save analysis with custom name
+  observeEvent(input$saveAnalysis, {
+    req(values$analysis_results)
+
+    # Get custom name or use default
+    custom_name <- input$analysisName
+    if(is.null(custom_name) || custom_name == "") {
+      custom_name <- paste0(input$treatedUnit, " Analysis")
+    }
+
+    tryCatch({
+      analysis_id <- paste0(
+        gsub("[^A-Za-z0-9]", "_", custom_name), "_",
+        format(Sys.time(), "%Y%m%d_%H%M%S")
+      )
+
+      analysis_data <- list(
+        analysisId = analysis_id,
+        fileName = custom_name,
+        treatedUnit = input$treatedUnit,
+        treatmentYear = input$treatmentYear,
+        analysisResults = values$analysis_results,
+        analysisConfig = list(
+          unitVar = input$unitVar,
+          timeVar = input$timeVar,
+          outcomeVar = input$outcomeVar,
+          predictorVars = input$predictorVars,
+          special_predictors = values$special_predictors
+        ),
+        rmspe = values$analysis_results$rmspe,
+        converged = values$analysis_results$converged,
+        inSpacePlacebo = values$in_space_placebo_results,
+        inTimePlacebo = values$in_time_placebo_results
+      )
+
+      session$sendCustomMessage("saveAnalysisResults", list(analysisData = analysis_data))
+
+      showNotification(
+        paste0("Analysis saved as: ", custom_name),
+        type = "message",
+        duration = 3
+      )
+
+      # Clear the input field
+      updateTextInput(session, "analysisName", value = "")
+
+    }, error = function(e) {
+      showNotification(
+        paste("Error saving analysis:", e$message),
+        type = "error",
+        duration = 5
+      )
+    })
+  })
+
   # History table
   output$historyTable <- DT::renderDataTable({
     req(values$analysis_history)
 
-    # Format the data for display
+    # Validate it's a proper list
+    if(!is.list(values$analysis_history) || length(values$analysis_history) == 0) {
+      return(DT::datatable(
+        data.frame(Message = "No analyses saved yet"),
+        options = list(dom = 't'),
+        rownames = FALSE
+      ))
+    }
+
+    cat("Rendering history table with", length(values$analysis_history), "entries\n")
+
+    # Format the data for display - use [[ for safer access
     history_df <- data.frame(
-      `Analysis ID` = sapply(values$analysis_history, function(x) x$analysisId),
-      `File Name` = sapply(values$analysis_history, function(x) x$fileName),
-      `Treated Unit` = sapply(values$analysis_history, function(x) x$treatedUnit),
-      `Treatment Year` = sapply(values$analysis_history, function(x) x$treatmentYear),
-      `RMSPE` = round(sapply(values$analysis_history, function(x) as.numeric(x$rmspe)), 4),
-      `Converged` = sapply(values$analysis_history, function(x) if(x$converged) "Yes" else "No"),
-      `Saved At` = sapply(values$analysis_history, function(x) {
-        format(as.POSIXct(x$savedAt), "%Y-%m-%d %H:%M")
+      `Analysis ID` = sapply(values$analysis_history, function(x) {
+        if(is.list(x) && "analysisId" %in% names(x)) x[["analysisId"]] else "N/A"
       }),
-      stringsAsFactors = FALSE
+      `File Name` = sapply(values$analysis_history, function(x) {
+        if(is.list(x) && "fileName" %in% names(x)) x[["fileName"]] else "N/A"
+      }),
+      `Treated Unit` = sapply(values$analysis_history, function(x) {
+        if(is.list(x) && "treatedUnit" %in% names(x)) x[["treatedUnit"]] else "N/A"
+      }),
+      `Treatment Year` = sapply(values$analysis_history, function(x) {
+        if(is.list(x) && "treatmentYear" %in% names(x)) x[["treatmentYear"]] else NA
+      }),
+      `RMSPE` = round(sapply(values$analysis_history, function(x) {
+        if(is.list(x) && "rmspe" %in% names(x)) as.numeric(x[["rmspe"]]) else NA
+      }), 4),
+      `Converged` = sapply(values$analysis_history, function(x) {
+        if(is.list(x) && "converged" %in% names(x) && x[["converged"]]) "Yes" else "No"
+      }),
+      `Saved At` = sapply(values$analysis_history, function(x) {
+        if(is.list(x) && "savedAt" %in% names(x)) {
+          format(as.POSIXct(x[["savedAt"]]), "%Y-%m-%d %H:%M")
+        } else {
+          "N/A"
+        }
+      }),
+      stringsAsFactors = FALSE,
+      check.names = FALSE
     )
+
+    cat("History table data frame has", nrow(history_df), "rows\n")
 
     DT::datatable(
       history_df,
@@ -2185,7 +1962,8 @@ Generated on %s",
         ordering = TRUE,
         order = list(list(6, "desc"))  # Sort by date descending
       ),
-      class = "compact stripe"
+      class = "compact stripe",
+      rownames = FALSE
     )
   })
 
@@ -2196,10 +1974,15 @@ Generated on %s",
     req(selected_row <= length(values$analysis_history))
 
     selected_analysis <- values$analysis_history[[selected_row]]
-    values$selected_history_analysis <- selected_analysis
-    values$show_analysis_summary <- TRUE
 
-    showNotification("Analysis summary loaded!", type = "message", duration = 2)
+    # Validate analysis data before storing
+    if(is.list(selected_analysis)) {
+      values$selected_history_analysis <- selected_analysis
+      values$show_analysis_summary <- TRUE
+      showNotification("Analysis summary loaded!", type = "message", duration = 2)
+    } else {
+      showNotification("Error: Invalid analysis data", type = "error", duration = 5)
+    }
   })
 
   # Selected analysis summary output
@@ -2208,7 +1991,37 @@ Generated on %s",
 
     analysis <- values$selected_history_analysis
 
-    summary_text <- sprintf(
+    # Safely extract values using [[ operator
+    tryCatch({
+      analysis_id <- if("analysisId" %in% names(analysis)) analysis[["analysisId"]] else "N/A"
+      file_name <- if("fileName" %in% names(analysis)) analysis[["fileName"]] else "N/A"
+      treated_unit <- if("treatedUnit" %in% names(analysis)) analysis[["treatedUnit"]] else "N/A"
+      treatment_year <- if("treatmentYear" %in% names(analysis)) analysis[["treatmentYear"]] else "N/A"
+      rmspe <- if("rmspe" %in% names(analysis)) as.numeric(analysis[["rmspe"]]) else NA
+      converged <- if("converged" %in% names(analysis) && analysis[["converged"]]) "Yes" else "No"
+      saved_at <- if("savedAt" %in% names(analysis)) {
+        format(as.POSIXct(analysis[["savedAt"]]), "%Y-%m-%d %H:%M:%S")
+      } else {
+        "N/A"
+      }
+
+      # Extract config safely
+      unit_var <- "N/A"
+      time_var <- "N/A"
+      outcome_var <- "N/A"
+      predictor_vars <- "None"
+
+      if("analysisConfig" %in% names(analysis) && is.list(analysis[["analysisConfig"]])) {
+        config <- analysis[["analysisConfig"]]
+        if("unitVar" %in% names(config)) unit_var <- config[["unitVar"]]
+        if("timeVar" %in% names(config)) time_var <- config[["timeVar"]]
+        if("outcomeVar" %in% names(config)) outcome_var <- config[["outcomeVar"]]
+        if("predictorVars" %in% names(config) && !is.null(config[["predictorVars"]])) {
+          predictor_vars <- paste(config[["predictorVars"]], collapse = ", ")
+        }
+      }
+
+      summary_text <- sprintf(
 "Analysis ID: %s
 File Name: %s
 Treated Unit: %s
@@ -2224,24 +2037,15 @@ Configuration:
 - Predictor Variables: %s
 
 This analysis can be loaded to view all results, plots, and details.",
-      analysis$analysisId,
-      analysis$fileName,
-      analysis$treatedUnit,
-      analysis$treatmentYear,
-      as.numeric(analysis$rmspe),
-      if(analysis$converged) "Yes" else "No",
-      format(as.POSIXct(analysis$savedAt), "%Y-%m-%d %H:%M:%S"),
-      if(!is.null(analysis$analysisConfig)) analysis$analysisConfig$unitVar else "N/A",
-      if(!is.null(analysis$analysisConfig)) analysis$analysisConfig$timeVar else "N/A",
-      if(!is.null(analysis$analysisConfig)) analysis$analysisConfig$outcomeVar else "N/A",
-      if(!is.null(analysis$analysisConfig) && !is.null(analysis$analysisConfig$predictorVars)) {
-        paste(analysis$analysisConfig$predictorVars, collapse = ", ")
-      } else {
-        "None"
-      }
-    )
+        analysis_id, file_name, treated_unit, treatment_year,
+        rmspe, converged, saved_at,
+        unit_var, time_var, outcome_var, predictor_vars
+      )
 
-    summary_text
+      summary_text
+    }, error = function(e) {
+      paste("Error rendering summary:", e$message)
+    })
   })
 
   # Load selected analysis button
@@ -2251,10 +2055,15 @@ This analysis can be loaded to view all results, plots, and details.",
     req(selected_row <= length(values$analysis_history))
 
     selected_analysis <- values$analysis_history[[selected_row]]
-    analysis_id <- selected_analysis$analysisId
 
-    showNotification("Loading analysis results...", type = "message", duration = NULL, id = "load_analysis")
-    session$sendCustomMessage("loadAnalysisResults", list(analysisId = analysis_id))
+    # Safely extract analysisId using [[ operator
+    if(is.list(selected_analysis) && "analysisId" %in% names(selected_analysis)) {
+      analysis_id <- selected_analysis[["analysisId"]]
+      showNotification("Loading analysis results...", type = "message", duration = NULL, id = "load_analysis")
+      session$sendCustomMessage("loadAnalysisResults", list(analysisId = analysis_id))
+    } else {
+      showNotification("Error: Invalid analysis data", type = "error", duration = 5)
+    }
   })
 
   # Handle loaded analysis data
@@ -2263,35 +2072,63 @@ This analysis can be loaded to view all results, plots, and details.",
     loaded_analysis <- input$loaded_analysis_data
 
     tryCatch({
+      # Validate that loaded_analysis is a list
+      if(!is.list(loaded_analysis)) {
+        stop(paste("Invalid data type:", class(loaded_analysis)[1], "- Expected list"))
+      }
+
+      # Safely extract analysisResults using [[ operator
+      if(!"analysisResults" %in% names(loaded_analysis)) {
+        stop("Missing 'analysisResults' in loaded data")
+      }
+
+      analysis_results <- loaded_analysis[["analysisResults"]]
+      if(is.null(analysis_results)) {
+        stop("Analysis results are NULL")
+      }
+
       # Restore the analysis results
-      values$analysis_results <- loaded_analysis$analysisResults
+      values$analysis_results <- analysis_results
       values$analysis_completed <- TRUE
 
-      # Also restore configuration if available
-      if(!is.null(loaded_analysis$analysisConfig)) {
-        config <- loaded_analysis$analysisConfig
+      # Restore placebo results if available
+      if("inSpacePlacebo" %in% names(loaded_analysis) && !is.null(loaded_analysis[["inSpacePlacebo"]])) {
+        values$in_space_placebo_results <- loaded_analysis[["inSpacePlacebo"]]
+        values$in_space_placebo_completed <- TRUE
+      }
 
-        # Update inputs to match the loaded analysis
-        if(!is.null(config$unitVar)) {
-          updateSelectInput(session, "unitVar", selected = config$unitVar)
-        }
-        if(!is.null(config$timeVar)) {
-          updateSelectInput(session, "timeVar", selected = config$timeVar)
-        }
-        if(!is.null(config$outcomeVar)) {
-          updateSelectInput(session, "outcomeVar", selected = config$outcomeVar)
-        }
-        if(!is.null(config$treatedUnit)) {
-          updateSelectInput(session, "treatedUnit", selected = loaded_analysis$treatedUnit)
-        }
-        if(!is.null(config$treatmentYear)) {
-          updateNumericInput(session, "treatmentYear", value = loaded_analysis$treatmentYear)
-        }
-        if(!is.null(config$predictorVars)) {
-          updateCheckboxGroupInput(session, "predictorVars", selected = config$predictorVars)
-        }
-        if(!is.null(config$special_predictors)) {
-          values$special_predictors <- config$special_predictors
+      if("inTimePlacebo" %in% names(loaded_analysis) && !is.null(loaded_analysis[["inTimePlacebo"]])) {
+        values$in_time_placebo_results <- loaded_analysis[["inTimePlacebo"]]
+        values$in_time_placebo_completed <- TRUE
+      }
+
+      # Also restore configuration if available
+      if("analysisConfig" %in% names(loaded_analysis) && !is.null(loaded_analysis[["analysisConfig"]])) {
+        config <- loaded_analysis[["analysisConfig"]]
+
+        # Update inputs to match the loaded analysis - use [[ for safer access
+        if(is.list(config)) {
+          if("unitVar" %in% names(config) && !is.null(config[["unitVar"]])) {
+            updateSelectInput(session, "unitVar", selected = config[["unitVar"]])
+          }
+          if("timeVar" %in% names(config) && !is.null(config[["timeVar"]])) {
+            updateSelectInput(session, "timeVar", selected = config[["timeVar"]])
+          }
+          if("outcomeVar" %in% names(config) && !is.null(config[["outcomeVar"]])) {
+            updateSelectInput(session, "outcomeVar", selected = config[["outcomeVar"]])
+          }
+          if("treatedUnit" %in% names(loaded_analysis) && !is.null(loaded_analysis[["treatedUnit"]])) {
+            updateSelectInput(session, "treatedUnit", selected = loaded_analysis[["treatedUnit"]])
+          }
+          if("treatmentYear" %in% names(loaded_analysis) && !is.null(loaded_analysis[["treatmentYear"]])) {
+            updateNumericInput(session, "treatmentYear", value = loaded_analysis[["treatmentYear"]])
+          }
+          if("predictorVars" %in% names(config) && !is.null(config[["predictorVars"]])) {
+            updateCheckboxGroupInput(session, "predictorVars", selected = config[["predictorVars"]])
+          }
+          if("special_predictors" %in% names(config) && !is.null(config[["special_predictors"]])) {
+            values$special_predictors <- config[["special_predictors"]]
+          }
         }
       }
 
@@ -2307,7 +2144,14 @@ This analysis can be loaded to view all results, plots, and details.",
 
     }, error = function(e) {
       removeNotification("load_analysis")
-      showNotification(paste("Error loading analysis:", e$message), type = "error", duration = 5)
+      showNotification(
+        paste("Error loading analysis:", e$message),
+        type = "error",
+        duration = 10
+      )
+      cat("ERROR loading analysis:", e$message, "\n")
+      cat("loaded_analysis structure:\n")
+      str(loaded_analysis)
     })
   })
 
@@ -2318,10 +2162,15 @@ This analysis can be loaded to view all results, plots, and details.",
     req(selected_row <= length(values$analysis_history))
 
     selected_analysis <- values$analysis_history[[selected_row]]
-    analysis_id <- selected_analysis$analysisId
 
-    session$sendCustomMessage("deleteAnalysis", list(analysisId = analysis_id))
-    values$show_analysis_summary <- FALSE
+    # Safely extract analysisId using [[ operator
+    if(is.list(selected_analysis) && "analysisId" %in% names(selected_analysis)) {
+      analysis_id <- selected_analysis[["analysisId"]]
+      session$sendCustomMessage("deleteAnalysis", list(analysisId = analysis_id))
+      values$show_analysis_summary <- FALSE
+    } else {
+      showNotification("Error: Invalid analysis data", type = "error", duration = 5)
+    }
     showNotification("Analysis deleted!", type = "warning", duration = 3)
   })
 
@@ -2407,288 +2256,181 @@ This analysis can be loaded to view all results, plots, and details.",
     }
   )
 
-  output$downloadReport <- downloadHandler(
+  # Placebo test plot downloads
+  output$downloadInSpaceGapPlot <- downloadHandler(
     filename = function() {
-      paste("synthetic_control_report_", Sys.Date(), ".pdf", sep = "")
+      paste("in_space_gap_plot_", Sys.Date(), ".png", sep = "")
+    },
+    content = function(file) {
+      req(values$in_space_placebo_results)
+      p <- plot_in_space_placebo(values$in_space_placebo_results)
+      ggsave(file, plot = p, width = 10, height = 6, dpi = 300)
+    }
+  )
+
+  output$downloadInSpaceRMSPEPlot <- downloadHandler(
+    filename = function() {
+      paste("in_space_rmspe_histogram_", Sys.Date(), ".png", sep = "")
+    },
+    content = function(file) {
+      req(values$in_space_placebo_results)
+      p <- plot_in_space_rmspe_histogram(values$in_space_placebo_results)
+      ggsave(file, plot = p, width = 10, height = 6, dpi = 300)
+    }
+  )
+
+  output$downloadInTimePathPlot <- downloadHandler(
+    filename = function() {
+      paste("in_time_path_plot_", Sys.Date(), ".png", sep = "")
+    },
+    content = function(file) {
+      req(values$in_time_placebo_results)
+      p <- plot_in_time_placebo_paths(values$in_time_placebo_results)
+      ggsave(file, plot = p, width = 10, height = 6, dpi = 300)
+    }
+  )
+
+  output$downloadInTimeGapPlot <- downloadHandler(
+    filename = function() {
+      paste("in_time_gap_plot_", Sys.Date(), ".png", sep = "")
+    },
+    content = function(file) {
+      req(values$in_time_placebo_results)
+      p <- plot_in_time_placebo(values$in_time_placebo_results)
+      ggsave(file, plot = p, width = 10, height = 6, dpi = 300)
+    }
+  )
+
+  # Download all plots as ZIP
+  output$downloadAllPlots <- downloadHandler(
+    filename = function() {
+      paste("all_plots_", Sys.Date(), ".zip", sep = "")
     },
     content = function(file) {
       req(values$analysis_results)
 
-      # Create temporary directory for plots
-      tempDir <- tempdir()
-      tempReport <- file.path(tempDir, "report.Rmd")
-
-      # Generate plots and save them temporarily
-      tryCatch({
-        showNotification("Generating plots for PDF...", type = "message", duration = NULL, id = "pdf_plots")
-
-        # Generate main plots with error handling
-        p1 <- plot_actual_vs_synthetic(
-          values$analysis_results$outcome_path,
-          values$analysis_results$treatment_year,
-          values$analysis_results$treated_unit
-        )
-        main_plot_path <- file.path(tempDir, "main_plot.png")
-        ggsave(main_plot_path, plot = p1, width = 10, height = 6, dpi = 300, device = "png")
-
-        if(!file.exists(main_plot_path)) {
-          stop("Failed to save main plot")
-        }
-
-        p2 <- plot_treatment_gap(
-          values$analysis_results$outcome_path,
-          values$analysis_results$treatment_year
-        )
-        gap_plot_path <- file.path(tempDir, "gap_plot.png")
-        ggsave(gap_plot_path, plot = p2, width = 10, height = 6, dpi = 300, device = "png")
-
-        if(!file.exists(gap_plot_path)) {
-          stop("Failed to save gap plot")
-        }
-
-        p3 <- plot_donor_weights(values$analysis_results$weights)
-        weights_plot_path <- file.path(tempDir, "weights_plot.png")
-        ggsave(weights_plot_path, plot = p3, width = 8, height = 6, dpi = 300, device = "png")
-
-        if(!file.exists(weights_plot_path)) {
-          stop("Failed to save weights plot")
-        }
-
-        removeNotification("pdf_plots")
-
-        # Include placebo plots if available
-        placebo_plot_section <- ""
-        if(values$placebo_completed && !is.null(values$placebo_results)) {
-          p_placebo <- plot_placebo_gaps(values$placebo_results$placebo_gaps, input$treatmentYear)
-          placebo_plot_path <- file.path(tempDir, "placebo_plot.png")
-          ggsave(placebo_plot_path, plot = p_placebo, width = 10, height = 6, dpi = 300)
-
-          placebo_plot_section <- sprintf('
-## Placebo Tests
-
-```{r echo=FALSE, fig.height=4}
-knitr::include_graphics("%s")
-```
-
-**P-value (Rank):** %.3f
-
-The placebo test evaluates whether the observed treatment effect is unusually large compared to what we would expect by chance. The red line shows the actual treated unit, while gray lines show the effects when we artificially assign treatment to donor units.
-
-', placebo_plot_path, values$placebo_results$ranking)
-        }
-
-        # Safely extract values and convert to appropriate types
-        treated_unit <- as.character(values$analysis_results$treated_unit)
-        treatment_year <- as.character(values$analysis_results$treatment_year)
-        num_donors <- length(values$analysis_results$donor_units)
-        rmspe <- as.numeric(values$analysis_results$rmspe)
-        converged <- ifelse(values$analysis_results$converged, "Yes", "No")
-
-        # Calculate average treatment effect safely
-        post_treatment_data <- values$analysis_results$outcome_path[values$analysis_results$outcome_path$post_treatment, ]
-        avg_treatment_effect <- mean(post_treatment_data$gap, na.rm = TRUE)
-
-        # Calculate balance info safely
-        pre_treatment_data <- values$analysis_results$outcome_path[!values$analysis_results$outcome_path$post_treatment, ]
-        treated_mean <- mean(pre_treatment_data$treated_outcome, na.rm = TRUE)
-        synthetic_mean <- mean(pre_treatment_data$synthetic_outcome, na.rm = TRUE)
-        balance_diff <- mean(pre_treatment_data$gap, na.rm = TRUE)
-
-        # Statistical inference text
-        stat_inference <- if(values$placebo_completed) {
-          sprintf("Placebo test p-value: %.3f", values$placebo_results$ranking)
-        } else {
-          "Run placebo tests for statistical inference"
-        }
-
-        # Create comprehensive report content
-        report_content <- sprintf('
----
-title: "Synthetic Control Analysis Report"
-date: "%s"
-output:
-  pdf_document:
-    fig_caption: yes
-geometry: margin=1in
----
-
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
-library(knitr)
-library(ggplot2)
-```
-
-# Executive Summary
-
-This report presents results from a synthetic control analysis examining the impact of an intervention on **%s** starting in **%s**. The synthetic control method creates a weighted combination of similar control units to approximate what would have happened to the treated unit in the absence of the intervention.
-
-# Analysis Configuration
-
-- **Treated Unit:** %s
-- **Treatment Year:** %s
-- **Number of Donor Units:** %d
-- **Pre-treatment RMSPE:** %.4f
-- **Analysis Converged:** %s
-
-# Results
-
-## Outcome Trajectory
-
-The following plot compares the actual outcome trajectory for the treated unit with its synthetic counterpart:
-
-```{r echo=FALSE, fig.height=4, fig.cap="Actual vs Synthetic Outcome"}
-knitr::include_graphics("%s")
-```
-
-## Treatment Effect
-
-The treatment effect (gap between actual and synthetic) over time:
-
-```{r echo=FALSE, fig.height=4, fig.cap="Treatment Effect Over Time"}
-knitr::include_graphics("%s")
-```
-
-**Average Post-treatment Effect:** %.3f
-
-## Donor Unit Composition
-
-The synthetic control is constructed using the following donor unit weights:
-
-```{r echo=FALSE, fig.height=4, fig.cap="Donor Unit Weights"}
-knitr::include_graphics("%s")
-```
-
-### Donor Weights Table
-
-```{r echo=FALSE}
-weights_df <- data.frame(
-  Unit = c(%s),
-  Weight = round(c(%s), 4),
-  stringsAsFactors = FALSE
-)
-weights_df <- weights_df[weights_df$Weight > 0, ]
-weights_df <- weights_df[order(weights_df$Weight, decreasing = TRUE), ]
-kable(weights_df, caption = "Donor Unit Weights (non-zero only)")
-```
-
-## Predictor Balance
-
-The pre-treatment balance between treated and synthetic units:
-
-```{r echo=FALSE}
-balance_df <- data.frame(
-  Predictor = "Outcome Variable",
-  Treated = %.3f,
-  Synthetic = %.3f,
-  Difference = %.3f,
-  stringsAsFactors = FALSE
-)
-kable(balance_df, caption = "Pre-treatment Predictor Balance")
-```
-
-%s
-
-# Interpretation
-
-The synthetic control method provides a transparent way to evaluate policy interventions by constructing a data-driven counterfactual. Key considerations:
-
-- **Pre-treatment Fit:** Lower RMSPE indicates better pre-treatment fit (current: %.4f)
-- **Treatment Effect:** The gap shows the estimated impact of the intervention
-- **Statistical Inference:** %s
-
-# Technical Notes
-
-- Analysis conducted using the Synth R package
-- Weights determined through optimization to minimize pre-treatment prediction error
-- Results should be interpreted alongside domain knowledge and institutional context
-
-*Report generated on %s using Synthetic Control Shiny App*
-
-',
-          # Header info
-          Sys.Date(),
-          treated_unit,
-          treatment_year,
-
-          # Configuration
-          treated_unit,
-          treatment_year,
-          num_donors,
-          rmspe,
-          converged,
-
-          # Plot paths
-          main_plot_path,
-          gap_plot_path,
-          weights_plot_path,
-
-          # Treatment effect
-          avg_treatment_effect,
-
-          # Weights table
-          paste('"', names(values$analysis_results$weights), '"', collapse = ", "),
-          paste(round(values$analysis_results$weights, 4), collapse = ", "),
-
-          # Balance info
-          treated_mean,
-          synthetic_mean,
-          balance_diff,
-
-          # Placebo section
-          placebo_plot_section,
-
-          # Footer info
-          rmspe,
-          stat_inference,
-          Sys.Date()
-        )
-
-        writeLines(report_content, tempReport)
-
-        # Render the report
-        rmarkdown::render(tempReport, output_file = file,
-                         envir = new.env(), quiet = TRUE)
-
-        # Clean up temporary plot files (optional - temp dir will be cleaned automatically)
-        unlink(c(main_plot_path, gap_plot_path, weights_plot_path))
-        if(values$placebo_completed) {
-          placebo_plot_path <- file.path(tempDir, "placebo_plot.png")
-          unlink(placebo_plot_path)
-        }
-
-      }, error = function(e) {
-        # Fallback to simple report if plot generation fails
-        simple_content <- sprintf('
----
-title: "Synthetic Control Analysis Report"
-date: "%s"
-output: pdf_document
----
-
-# Analysis Summary
-
-**Error:** Could not generate plots for report: %s
-
-**Treated Unit:** %s
-**Treatment Year:** %s
-**RMSPE:** %.3f
-
-Please check the console for errors and try again.
-
-*Report generated by Synthetic Control Shiny App*
-',
-          Sys.Date(),
-          e$message,
-          values$analysis_results$treated_unit,
-          values$analysis_results$treatment_year,
-          values$analysis_results$rmspe
-        )
-
-        writeLines(simple_content, tempReport)
-        rmarkdown::render(tempReport, output_file = file, envir = new.env(), quiet = TRUE)
-      })
+      # Create temporary directory
+      temp_dir <- file.path(tempdir(), "plots")
+      dir.create(temp_dir, showWarnings = FALSE, recursive = TRUE)
+
+      # Generate and save all main plots
+      p1 <- plot_actual_vs_synthetic(
+        values$analysis_results$outcome_path,
+        values$analysis_results$treatment_year,
+        values$analysis_results$treated_unit
+      )
+      ggsave(file.path(temp_dir, "01_main_plot.png"), plot = p1,
+             width = 10, height = 6, dpi = 300)
+
+      p2 <- plot_treatment_gap(
+        values$analysis_results$outcome_path,
+        values$analysis_results$treatment_year
+      )
+      ggsave(file.path(temp_dir, "02_gap_plot.png"), plot = p2,
+             width = 10, height = 6, dpi = 300)
+
+      p3 <- plot_donor_weights(values$analysis_results$weights)
+      ggsave(file.path(temp_dir, "03_donor_weights.png"), plot = p3,
+             width = 8, height = 6, dpi = 300)
+
+      # Add in-space placebo plots if available
+      if(!is.null(values$in_space_placebo_results)) {
+        p4 <- plot_in_space_placebo(values$in_space_placebo_results)
+        ggsave(file.path(temp_dir, "04_in_space_gap.png"), plot = p4,
+               width = 10, height = 6, dpi = 300)
+
+        p5 <- plot_in_space_rmspe_histogram(values$in_space_placebo_results)
+        ggsave(file.path(temp_dir, "05_in_space_rmspe.png"), plot = p5,
+               width = 10, height = 6, dpi = 300)
+      }
+
+      # Add in-time placebo plots if available
+      if(!is.null(values$in_time_placebo_results)) {
+        p6 <- plot_in_time_placebo_paths(values$in_time_placebo_results)
+        ggsave(file.path(temp_dir, "06_in_time_paths.png"), plot = p6,
+               width = 10, height = 6, dpi = 300)
+
+        p7 <- plot_in_time_placebo(values$in_time_placebo_results)
+        ggsave(file.path(temp_dir, "07_in_time_gap.png"), plot = p7,
+               width = 10, height = 6, dpi = 300)
+      }
+
+      # Create ZIP file
+      zip::zip(file, files = list.files(temp_dir, full.names = TRUE),
+               mode = "cherry-pick")
+
+      # Clean up
+      unlink(temp_dir, recursive = TRUE)
     }
   )
+
+  # Download all data as ZIP
+  output$downloadAllData <- downloadHandler(
+    filename = function() {
+      paste("all_data_", Sys.Date(), ".zip", sep = "")
+    },
+    content = function(file) {
+      req(values$analysis_results)
+
+      # Create temporary directory
+      temp_dir <- file.path(tempdir(), "data")
+      dir.create(temp_dir, showWarnings = FALSE, recursive = TRUE)
+
+      # Save main analysis results
+      write.csv(values$analysis_results$outcome_path,
+                file.path(temp_dir, "01_outcome_path.csv"),
+                row.names = FALSE)
+
+      # Save weights
+      weights_df <- data.frame(
+        Unit = names(values$analysis_results$weights),
+        Weight = as.numeric(values$analysis_results$weights)
+      )
+      weights_df <- weights_df[weights_df$Weight > 0, ]
+      weights_df <- weights_df[order(weights_df$Weight, decreasing = TRUE), ]
+      write.csv(weights_df,
+                file.path(temp_dir, "02_donor_weights.csv"),
+                row.names = FALSE)
+
+      # Save balance table if available
+      if(!is.null(values$analysis_results$balance_table)) {
+        write.csv(values$analysis_results$balance_table,
+                  file.path(temp_dir, "03_balance_table.csv"),
+                  row.names = FALSE)
+      }
+
+      # Save in-space placebo results if available
+      if(!is.null(values$in_space_placebo_results)) {
+        write.csv(values$in_space_placebo_results$summary_df,
+                  file.path(temp_dir, "04_in_space_placebo_summary.csv"),
+                  row.names = FALSE)
+        write.csv(values$in_space_placebo_results$gap_df,
+                  file.path(temp_dir, "05_in_space_placebo_gaps.csv"),
+                  row.names = FALSE)
+      }
+
+      # Save in-time placebo results if available
+      if(!is.null(values$in_time_placebo_results)) {
+        write.csv(values$in_time_placebo_results$summary_df,
+                  file.path(temp_dir, "06_in_time_placebo_summary.csv"),
+                  row.names = FALSE)
+        write.csv(values$in_time_placebo_results$gap_df,
+                  file.path(temp_dir, "07_in_time_placebo_gaps.csv"),
+                  row.names = FALSE)
+        write.csv(values$in_time_placebo_results$path_df,
+                  file.path(temp_dir, "08_in_time_placebo_paths.csv"),
+                  row.names = FALSE)
+      }
+
+      # Create ZIP file
+      zip::zip(file, files = list.files(temp_dir, full.names = TRUE),
+               mode = "cherry-pick")
+
+      # Clean up
+      unlink(temp_dir, recursive = TRUE)
+    }
+  )
+
 
   # ============================================
   # NEW PLACEBO TEST HANDLERS
@@ -2758,7 +2500,7 @@ Please check the console for errors and try again.
   # In-Time Placebo Test
   observeEvent(input$runInTimePlacebo, {
     req(values$analysis_results, input$unitVar, input$timeVar, input$outcomeVar,
-        input$treatedUnit, input$treatmentYear, input$numFakeTimes)
+        input$treatedUnit, input$treatmentYear, input$fakeTreatmentYear)
 
     # Reset state
     values$in_time_placebo_results <- NULL
@@ -2766,43 +2508,38 @@ Please check the console for errors and try again.
 
     tryCatch({
       showNotification(
-        HTML(paste0(icon("spinner", class = "fa-spin"), " Running in-time placebo tests...")),
+        HTML(paste0(icon("spinner", class = "fa-spin"), " Running in-time placebo test...")),
         type = "message", duration = NULL, id = "in_time_placebo_progress"
       )
 
-      # Generate fake treatment times
-      all_times <- sort(unique(values$data[[input$timeVar]]))
-      pre_times <- all_times[all_times < input$treatmentYear]
+      # Validate fake treatment year
+      if(input$fakeTreatmentYear >= input$treatmentYear) {
+        stop("Fake treatment year must be before the real treatment year")
+      }
 
-      # Minimum periods required for each fake test (matching the function defaults)
+      all_times <- sort(unique(values$data[[input$timeVar]]))
+
+      if(!(input$fakeTreatmentYear %in% all_times)) {
+        stop("Fake treatment year does not exist in the data")
+      }
+
+      # Minimum periods required
       min_pre_periods <- 3
       min_post_periods <- 2
-      min_total_buffer <- min_pre_periods + min_post_periods
 
-      if(length(pre_times) < min_total_buffer + input$numFakeTimes) {
-        stop(paste("Not enough pre-treatment periods. Need at least",
-                  min_total_buffer + input$numFakeTimes,
-                  "pre-treatment periods for", input$numFakeTimes, "fake times"))
+      pre_fake_times <- all_times[all_times < input$fakeTreatmentYear]
+      post_fake_times <- all_times[all_times >= input$fakeTreatmentYear & all_times < input$treatmentYear]
+
+      if(length(pre_fake_times) < min_pre_periods) {
+        stop(paste("Not enough pre-periods before fake treatment year. Need at least", min_pre_periods))
       }
 
-      # Create evenly spaced fake times, ensuring sufficient periods
-      min_fake <- min(pre_times) + min_pre_periods  # Leave buffer for pre-periods
-      max_fake <- input$treatmentYear - min_post_periods - 1  # Leave buffer for post-periods
-
-      if(max_fake <= min_fake) {
-        stop("Not enough time periods for fake treatment times with required buffers")
+      if(length(post_fake_times) < min_post_periods) {
+        stop(paste("Not enough post-periods after fake treatment year. Need at least", min_post_periods))
       }
 
-      fake_treat_times <- seq(min_fake, max_fake, length.out = input$numFakeTimes)
-      fake_treat_times <- round(fake_treat_times)
-      fake_treat_times <- unique(fake_treat_times)
-
-      # Ensure fake times exist in the data
-      fake_treat_times <- fake_treat_times[fake_treat_times %in% pre_times]
-
-      if(length(fake_treat_times) == 0) {
-        stop("No valid fake treatment times could be generated")
-      }
+      # Store fake treatment year for plotting
+      values$fake_treatment_year <- input$fakeTreatmentYear
 
       # Use same predictor config as main analysis
       predictor_vars <- input$predictorVars
@@ -2823,7 +2560,7 @@ Please check the console for errors and try again.
         time_var = input$timeVar,
         treated_unit = input$treatedUnit,
         true_treat_time = input$treatmentYear,
-        fake_treat_times = fake_treat_times,
+        fake_treat_times = input$fakeTreatmentYear,
         predictor_vars = predictor_vars,
         special_predictors_config = special_predictors_config
       )
@@ -2834,9 +2571,7 @@ Please check the console for errors and try again.
       showNotification(
         HTML(paste0(
           icon("check-circle"),
-          " In-time placebo completed! (",
-          values$in_time_placebo_results$successful_tests, "/",
-          values$in_time_placebo_results$total_attempted, " successful)"
+          " In-time placebo completed!"
         )),
         type = "message", duration = 5
       )
@@ -2870,6 +2605,11 @@ Please check the console for errors and try again.
     plot_in_space_placebo(values$in_space_placebo_results)
   })
 
+  output$inSpaceRMSPEHistogram <- renderPlot({
+    req(values$in_space_placebo_results)
+    plot_in_space_rmspe_histogram(values$in_space_placebo_results)
+  })
+
   output$inSpacePlaceboTable <- DT::renderDataTable({
     req(values$in_space_placebo_results)
     DT::datatable(values$in_space_placebo_results$summary_df,
@@ -2878,6 +2618,11 @@ Please check the console for errors and try again.
   })
 
   # In-Time Placebo Outputs
+  output$inTimePlaceboPathPlot <- renderPlot({
+    req(values$in_time_placebo_results)
+    plot_in_time_placebo_paths(values$in_time_placebo_results)
+  })
+
   output$inTimePlaceboPlot <- renderPlot({
     req(values$in_time_placebo_results)
     plot_in_time_placebo(values$in_time_placebo_results)

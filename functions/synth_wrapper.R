@@ -82,8 +82,9 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
     }
   }
   
-  # If no special predictors configured, use outcome at each pre-treatment time point
-  if(length(special_predictors) == 0) {
+  # Only create default special predictors if BOTH regular predictors AND special predictors are empty
+  # This ensures we match standard Synth package usage where users can use ONLY regular predictors
+  if(length(special_predictors) == 0 && (is.null(predictor_vars) || length(predictor_vars) == 0)) {
     # Default: use outcome variable at each pre-treatment period
     for(t in pre_times) {
       special_predictors[[length(special_predictors) + 1]] <- list(
@@ -98,7 +99,11 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
   if(!is.null(predictor_vars) && length(predictor_vars) > 0) {
     message(paste("Regular predictors:", paste(predictor_vars, collapse = ", ")))
   }
-  
+
+  # Pass NULL instead of empty list for special.predictors if not configured
+  # This matches standard Synth package behavior
+  special_pred_arg <- if(length(special_predictors) > 0) special_predictors else NULL
+
   # Prepare data using Synth::dataprep()
   message("Running dataprep()...")
   dataprep_out <- tryCatch({
@@ -107,7 +112,7 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
       predictors = predictor_vars,          # Regular predictors (pre-treatment mean)
       predictors.op = "mean",
       time.predictors.prior = pre_times,
-      special.predictors = special_predictors,  # Special predictors with time windows
+      special.predictors = special_pred_arg,  # Special predictors with time windows (NULL if not configured)
       dependent = outcome_var,
       unit.variable = "unit_num",
       time.variable = time_var,
