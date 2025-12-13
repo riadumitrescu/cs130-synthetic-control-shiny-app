@@ -22,39 +22,36 @@ source("functions/placebo_tests.R")
 # Define UI
 ui <- dashboardPage(
   dashboardHeader(
-    title = "Synthetic Control Analysis",
-    tags$li(class = "dropdown",
-           tags$style(HTML("
-             .save-params-btn {
-               margin: 8px 15px;
-               padding: 8px 16px;
-               background-color: #28a745;
-               color: white;
-               border: none;
-               border-radius: 4px;
-               cursor: pointer;
-               font-size: 14px;
-             }
-             .save-params-btn:hover {
-               background-color: #218838;
-             }
-             .save-params-btn i {
-               margin-right: 5px;
-             }
-           ")),
-           actionButton("saveParamsHeader",
-                       label = tags$span(icon("save"), " Save Parameters"),
-                       class = "save-params-btn",
-                       style = "margin-top: 8px;"))
+    title = "Synthetic Control Analysis"
   ),
 
   dashboardSidebar(
     sidebarMenu(
+      id = "sidebar",
       menuItem("1. Upload Data", tabName = "upload", icon = icon("upload")),
       menuItem("2. Configure Analysis", tabName = "config", icon = icon("cog")),
       menuItem("3. Results", tabName = "results", icon = icon("chart-line")),
       menuItem("4. Placebo Tests", tabName = "placebo", icon = icon("flask")),
       menuItem("5. Export", tabName = "export", icon = icon("download"))
+    ),
+    tags$div(
+      style = "position: absolute; bottom: 10px; width: 100%; padding: 15px; text-align: center; color: #999; font-size: 11px; border-top: 1px solid #444;",
+      tags$div(
+        style = "margin-bottom: 5px;",
+        "Made by"
+      ),
+      tags$div(
+        style = "font-weight: bold; color: #aaa;",
+        "Hakkei Sekine &"
+      ),
+      tags$div(
+        style = "font-weight: bold; color: #aaa;",
+        "Maria Dumitrescu"
+      ),
+      tags$div(
+        style = "margin-top: 5px; font-size: 10px;",
+        "2025"
+      )
     )
   ),
 
@@ -724,13 +721,23 @@ ui <- dashboardPage(
                 condition = "output.readyForAnalysis",
                 verbatimTextOutput("analysisSummary"),
                 hr(),
-                actionButton("runAnalysis", "Run Synthetic Control Analysis",
-                           class = "btn-success btn-lg", style = "width: 100%;", icon = icon("play")),
-                br(), br(),
+                fluidRow(
+                  column(6,
+                    actionButton("saveParamsConfig", "Save Parameters",
+                               class = "btn-info btn-lg", style = "width: 100%;", icon = icon("save"))
+                  ),
+                  column(6,
+                    actionButton("runAnalysis", "Run Synthetic Control Analysis",
+                               class = "btn-success btn-lg", style = "width: 100%;", icon = icon("play"))
+                  )
+                ),
+                br(),
                 conditionalPanel(
                   condition = "output.analysisCompleted",
                   div(class = "alert alert-success",
-                      icon("check"), " Analysis completed! View results in the Results tab.")
+                      icon("check"), " Analysis completed!"),
+                  actionButton("goToResults", "Show Results",
+                             class = "btn-primary btn-lg", style = "width: 100%;", icon = icon("chart-line"))
                 )
               ),
               conditionalPanel(
@@ -1294,7 +1301,7 @@ server <- function(input, output, session) {
   # ============================================
 
   # Show modal dialog when Save Parameters button is clicked
-  observeEvent(input$saveParamsHeader, {
+  observeEvent(input$saveParamsConfig, {
     # Validate that we have the minimum required parameters
     if(is.null(input$unitVar) || is.null(input$timeVar) || is.null(input$outcomeVar)) {
       showNotification(
@@ -1363,6 +1370,11 @@ server <- function(input, output, session) {
         duration = 5
       )
     })
+  })
+
+  # Navigate to Results tab when Show Results button is clicked
+  observeEvent(input$goToResults, {
+    updateTabItems(session, "sidebar", "results")
   })
 
   # Handle loaded parameter configuration
