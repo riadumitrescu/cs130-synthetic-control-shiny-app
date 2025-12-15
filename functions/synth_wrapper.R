@@ -5,7 +5,7 @@ library(Synth)
 library(dplyr)
 
 #' Run synthetic control analysis using the Synth package
-#' 
+#'
 #' @param data Panel dataset
 #' @param unit_var Name of unit identifier column
 #' @param time_var Name of time variable column
@@ -18,11 +18,17 @@ library(dplyr)
 #'   - start: start year of time window
 #'   - end: end year of time window
 #'   - op: aggregation operator ("mean", "median", etc.)
+#' @param time_predictors_prior Optional: custom range for time.predictors.prior (NULL = all pre-treatment)
+#' @param time_optimize_ssr Optional: custom range for time.optimize.ssr (NULL = all pre-treatment)
+#' @param time_plot Optional: custom range for time.plot (NULL = all available years)
 #' @return List containing synth results and extracted data for plotting
 run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
-                                treated_unit, treatment_year, 
+                                treated_unit, treatment_year,
                                 predictor_vars = NULL,
-                                special_predictors_config = NULL) {
+                                special_predictors_config = NULL,
+                                time_predictors_prior = NULL,
+                                time_optimize_ssr = NULL,
+                                time_plot = NULL) {
   
   # Convert to data.frame
   data <- as.data.frame(data)
@@ -47,43 +53,85 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
   all_times <- sort(unique(data[[time_var]]))
   pre_times <- all_times[all_times < treatment_year]
   post_times <- all_times[all_times >= treatment_year]
-  
+
   if(length(pre_times) < 2) {
     stop("Need at least 2 pre-treatment periods")
   }
   if(length(control_ids) < 2) {
     stop("Need at least 2 control units in donor pool")
   }
+
+  # Use custom time periods if provided, otherwise use defaults
+  # time.predictors.prior: period for calculating predictor means
+  time_pred_prior <- if(!is.null(time_predictors_prior) && length(time_predictors_prior) > 0) {
+    time_predictors_prior
+  } else {
+    pre_times  # Default: all pre-treatment years
+  }
+
+  # time.optimize.ssr: period for optimization
+  time_opt_ssr <- if(!is.null(time_optimize_ssr) && length(time_optimize_ssr) > 0) {
+    time_optimize_ssr
+  } else {
+    pre_times  # Default: all pre-treatment years
+  }
+
+  # time.plot: period for plotting
+  time_plt <- if(!is.null(time_plot) && length(time_plot) > 0) {
+    time_plot
+  } else {
+    all_times  # Default: all available years
+  }
+
+  message(paste("Time periods configured:"))
+  message(paste("  - Predictor means:", min(time_pred_prior), "to", max(time_pred_prior)))
+  message(paste("  - Optimization:", min(time_opt_ssr), "to", max(time_opt_ssr)))
+  message(paste("  - Plotting:", min(time_plt), "to", max(time_plt)))
   
   # Build special.predictors list from config
   # Each element: list(varname, time_range, operator)
   special_predictors <- list()
-  
+
   if(!is.null(special_predictors_config) && length(special_predictors_config) > 0) {
+    message("\n=== Building Special Predictors ===")
+    message(paste("Number of special predictor configs:", length(special_predictors_config)))
+
     for(i in seq_along(special_predictors_config)) {
       cfg <- special_predictors_config[[i]]
       var_name <- cfg[["var"]]
       start_year <- cfg[["start"]]
       end_year <- cfg[["end"]]
       op <- if(!is.null(cfg[["op"]])) cfg[["op"]] else "mean"
-      
-      # Create time range within pre-treatment period
+
+      message(paste0("  Config ", i, ": var='", var_name, "', start=", start_year, ", end=", end_year, ", op='", op, "'"))
+
+      # Create time range (don't filter - let Synth package handle validation)
+      # Always use seq() to ensure consistent vector handling (even for single years)
       time_range <- seq(start_year, end_year)
-      # Filter to only include times that exist in data and are pre-treatment
-      time_range <- intersect(time_range, pre_times)
-      
-      if(length(time_range) > 0) {
+      message(paste0("    -> Year range: ", paste(time_range, collapse=", "),
+                    if(start_year == end_year) " (single year)" else ""))
+
+      # Validate that at least some years exist in the data
+      available_years <- intersect(time_range, all_times)
+
+      if(length(available_years) > 0) {
         special_predictors[[length(special_predictors) + 1]] <- list(
           var_name,
           time_range,
           op
         )
+        message(paste0("    -> Added special predictor: list('", var_name, "', ",
+                      paste(time_range, collapse=", "), ", '", op, "')"))
+      } else {
+        message(paste0("    -> WARNING: Time range not found in data - predictor NOT added"))
       }
     }
+    message("=== End Special Predictors ===\n")
   }
   
-  # If no special predictors configured, use outcome at each pre-treatment time point
-  if(length(special_predictors) == 0) {
+  # Only create default special predictors if BOTH regular predictors AND special predictors are empty
+  # This ensures we match standard Synth package usage where users can use ONLY regular predictors
+  if(length(special_predictors) == 0 && (is.null(predictor_vars) || length(predictor_vars) == 0)) {
     # Default: use outcome variable at each pre-treatment period
     for(t in pre_times) {
       special_predictors[[length(special_predictors) + 1]] <- list(
@@ -94,27 +142,42 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
     }
   }
   
-  message(paste("Configured", length(special_predictors), "special predictors"))
+  message(paste("\nConfigured", length(special_predictors), "special predictors"))
+  if(length(special_predictors) > 0) {
+    message("Special predictors list format (passed to dataprep):")
+    for(i in seq_along(special_predictors)) {
+      sp <- special_predictors[[i]]
+      message(paste0("  [[", i, "]] = list('", sp[[1]], "', ",
+                    if(length(sp[[2]]) == 1) sp[[2]] else paste0("c(", paste(sp[[2]], collapse=", "), ")"),
+                    ", '", sp[[3]], "')"))
+    }
+  }
   if(!is.null(predictor_vars) && length(predictor_vars) > 0) {
     message(paste("Regular predictors:", paste(predictor_vars, collapse = ", ")))
   }
-  
+
+  # Pass NULL instead of empty list for special.predictors if not configured
+  # This matches standard Synth package behavior
+  special_pred_arg <- if(length(special_predictors) > 0) special_predictors else NULL
+
   # Prepare data using Synth::dataprep()
   message("Running dataprep()...")
+  message("Note: Missing values in predictors will be ignored (na.rm=TRUE)")
+
   dataprep_out <- tryCatch({
     result <- dataprep(
       foo = data,
       predictors = predictor_vars,          # Regular predictors (pre-treatment mean)
       predictors.op = "mean",
-      time.predictors.prior = pre_times,
-      special.predictors = special_predictors,  # Special predictors with time windows
+      time.predictors.prior = time_pred_prior,
+      special.predictors = special_pred_arg,  # Special predictors with time windows (NULL if not configured)
       dependent = outcome_var,
       unit.variable = "unit_num",
       time.variable = time_var,
       treatment.identifier = treated_id,
       controls.identifier = control_ids,
-      time.optimize.ssr = pre_times,
-      time.plot = all_times
+      time.optimize.ssr = time_opt_ssr,
+      time.plot = time_plt
     )
     
     # Validate dataprep result
@@ -200,7 +263,7 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
   })
   
   outcome_path <- data.frame(
-    time = all_times,
+    time = time_plt,
     treated_outcome = treated_outcome,
     synthetic_outcome = synthetic_outcome,
     stringsAsFactors = FALSE
@@ -266,9 +329,9 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
 
 
 #' Run placebo tests using the Synth package
-#' 
+#'
 #' Runs synthetic control on each donor unit as if it were treated
-#' 
+#'
 #' @param data Panel dataset
 #' @param unit_var Name of unit identifier column
 #' @param time_var Name of time variable column
@@ -277,11 +340,17 @@ run_synth_analysis <- function(data, unit_var, time_var, outcome_var,
 #' @param treatment_year The year treatment begins
 #' @param predictor_vars Vector of regular predictor variable names
 #' @param special_predictors_config List of special predictor configs
+#' @param time_predictors_prior Optional: custom range for time.predictors.prior (NULL = all pre-treatment)
+#' @param time_optimize_ssr Optional: custom range for time.optimize.ssr (NULL = all pre-treatment)
+#' @param time_plot Optional: custom range for time.plot (NULL = all available years)
 #' @return List with placebo gaps and ranking
 run_synth_placebo <- function(data, unit_var, time_var, outcome_var,
-                               treated_unit, treatment_year, 
+                               treated_unit, treatment_year,
                                predictor_vars = NULL,
-                               special_predictors_config = NULL) {
+                               special_predictors_config = NULL,
+                               time_predictors_prior = NULL,
+                               time_optimize_ssr = NULL,
+                               time_plot = NULL) {
   
   data <- as.data.frame(data)
   
@@ -311,7 +380,10 @@ run_synth_placebo <- function(data, unit_var, time_var, outcome_var,
           treated_unit = unit,
           treatment_year = treatment_year,
           predictor_vars = predictor_vars,
-          special_predictors_config = special_predictors_config
+          special_predictors_config = special_predictors_config,
+          time_predictors_prior = time_predictors_prior,
+          time_optimize_ssr = time_optimize_ssr,
+          time_plot = time_plot
         )
       }, error = function(e) {
         error_msg <- tryCatch({

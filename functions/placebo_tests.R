@@ -18,11 +18,15 @@ library(ggplot2)
 #' @param outcome_var Name of outcome variable column
 #' @param predictor_vars Vector of predictor variable names
 #' @param special_predictors_config List of special predictor configs
+#' @param time_predictors_prior Optional: custom range for time.predictors.prior
+#' @param time_optimize_ssr Optional: custom range for time.optimize.ssr
+#' @param time_plot Optional: custom range for time.plot
 #' @return List with time, Y_treated, Y_synth, gap, and metadata
 synth_runner <- function(data, treated_unit_id, treat_time_point,
                         pre_periods, post_periods, donor_pool,
                         unit_var, time_var, outcome_var,
-                        predictor_vars = NULL, special_predictors_config = NULL) {
+                        predictor_vars = NULL, special_predictors_config = NULL,
+                        time_predictors_prior = NULL, time_optimize_ssr = NULL, time_plot = NULL) {
 
   tryCatch({
     # Filter data to only include relevant units and time periods
@@ -43,7 +47,10 @@ synth_runner <- function(data, treated_unit_id, treat_time_point,
       treated_unit = treated_unit_id,
       treatment_year = treat_time_point,
       predictor_vars = predictor_vars,
-      special_predictors_config = special_predictors_config
+      special_predictors_config = special_predictors_config,
+      time_predictors_prior = time_predictors_prior,
+      time_optimize_ssr = time_optimize_ssr,
+      time_plot = time_plot
     )
 
     # Extract outcome paths
@@ -93,12 +100,16 @@ synth_runner <- function(data, treated_unit_id, treat_time_point,
 #' @param predictor_vars Vector of predictor variable names
 #' @param special_predictors_config List of special predictor configs
 #' @param exclude_treated_from_donor Whether to exclude real treated unit from donor pools in placebos
+#' @param time_predictors_prior Optional: custom range for time.predictors.prior
+#' @param time_optimize_ssr Optional: custom range for time.optimize.ssr
+#' @param time_plot Optional: custom range for time.plot
 #' @return List with gap_df (long format gaps) and summary_df (unit-level summaries)
 in_space_placebo <- function(data, outcome_var, unit_var, time_var,
                             treated_unit, treat_time,
                             donor_units = NULL, pre_period = NULL, post_period = NULL,
                             predictor_vars = NULL, special_predictors_config = NULL,
-                            exclude_treated_from_donor = TRUE) {
+                            exclude_treated_from_donor = TRUE,
+                            time_predictors_prior = NULL, time_optimize_ssr = NULL, time_plot = NULL) {
 
   # Data validation
   if(!all(c(unit_var, time_var, outcome_var) %in% names(data))) {
@@ -149,7 +160,10 @@ in_space_placebo <- function(data, outcome_var, unit_var, time_var,
     time_var = time_var,
     outcome_var = outcome_var,
     predictor_vars = predictor_vars,
-    special_predictors_config = special_predictors_config
+    special_predictors_config = special_predictors_config,
+    time_predictors_prior = time_predictors_prior,
+    time_optimize_ssr = time_optimize_ssr,
+    time_plot = time_plot
   )
 
   if(length(res_treated$time) == 0) {
@@ -211,7 +225,10 @@ in_space_placebo <- function(data, outcome_var, unit_var, time_var,
       time_var = time_var,
       outcome_var = outcome_var,
       predictor_vars = predictor_vars,
-      special_predictors_config = special_predictors_config
+      special_predictors_config = special_predictors_config,
+      time_predictors_prior = time_predictors_prior,
+      time_optimize_ssr = time_optimize_ssr,
+      time_plot = time_plot
     )
 
     if(length(res_u$time) == 0 || !is.null(res_u$error)) {
@@ -369,22 +386,27 @@ in_time_placebo <- function(data, outcome_var, unit_var, time_var,
     message(paste0(i, ". Testing fake treatment time: ", fake_time))
 
     # Define periods for this fake treatment
+    # Extend through the real treatment time to show comparison
     pre_period_fake <- all_times[all_times < fake_time]
-    post_period_fake <- all_times[all_times >= fake_time & all_times < true_treat_time]
+    post_period_fake <- all_times[all_times >= fake_time & all_times <= true_treat_time]
 
-    # Validate sufficient periods
+    # Validate sufficient periods (but allow extension to true treatment)
     if(length(pre_period_fake) < min_pre_periods) {
       message(paste("  Skipping - insufficient pre-periods:", length(pre_period_fake)))
       next
     }
-    if(length(post_period_fake) < min_post_periods) {
-      message(paste("  Skipping - insufficient post-periods:", length(post_period_fake)))
+    # We need at least min_post_periods before the true treatment time
+    post_before_true <- all_times[all_times >= fake_time & all_times < true_treat_time]
+    if(length(post_before_true) < min_post_periods) {
+      message(paste("  Skipping - insufficient post-periods before real treatment:", length(post_before_true)))
       next
     }
 
     message(paste("  Pre-periods:", length(pre_period_fake), "Post-periods:", length(post_period_fake)))
 
     # Run synthetic control with fake treatment time
+    # Note: For in-time placebo, we don't use custom time parameters
+    # because they were set for the real treatment time, not fake times
     res_fake <- synth_runner(
       data = data,
       treated_unit_id = treated_unit,
@@ -396,7 +418,10 @@ in_time_placebo <- function(data, outcome_var, unit_var, time_var,
       time_var = time_var,
       outcome_var = outcome_var,
       predictor_vars = predictor_vars,
-      special_predictors_config = special_predictors_config
+      special_predictors_config = special_predictors_config,
+      time_predictors_prior = NULL,  # Use defaults for fake treatment time
+      time_optimize_ssr = NULL,      # Use defaults for fake treatment time
+      time_plot = NULL               # Use defaults for fake treatment time
     )
 
     if(length(res_fake$time) == 0 || !is.null(res_fake$error)) {
@@ -404,10 +429,11 @@ in_time_placebo <- function(data, outcome_var, unit_var, time_var,
       next
     }
 
-    # Calculate RMSPE ratios
+    # Calculate RMSPE ratios (only for periods before true treatment)
     gap_fake <- res_fake$gap
     pre_gaps_fake <- gap_fake[res_fake$time %in% pre_period_fake]
-    post_gaps_fake <- gap_fake[res_fake$time %in% post_period_fake]
+    # For RMSPE, only use post-fake periods before true treatment
+    post_gaps_fake <- gap_fake[res_fake$time %in% post_before_true]
 
     RMSPE_pre_fake <- sqrt(mean(pre_gaps_fake^2, na.rm = TRUE))
     RMSPE_post_fake <- sqrt(mean(post_gaps_fake^2, na.rm = TRUE))
@@ -417,12 +443,14 @@ in_time_placebo <- function(data, outcome_var, unit_var, time_var,
       fake_treat_time = fake_time,
       time = res_fake$time,
       gap = gap_fake,
+      Y_treated = res_fake$Y_treated,
+      Y_synth = res_fake$Y_synth,
       RMSPE_pre = RMSPE_pre_fake,
       RMSPE_post = RMSPE_post_fake,
       ratio = ratio_fake,
       converged = res_fake$converged,
       pre_periods_count = length(pre_period_fake),
-      post_periods_count = length(post_period_fake)
+      post_periods_count = length(post_before_true)
     )
 
     message(paste("  Success - RMSPE ratio:", round(ratio_fake, 3)))
@@ -436,6 +464,7 @@ in_time_placebo <- function(data, outcome_var, unit_var, time_var,
 
   # Combine results into data frames
   gap_df_list <- list()
+  path_df_list <- list()
   summary_df_list <- list()
 
   for(res in results_list) {
@@ -444,6 +473,15 @@ in_time_placebo <- function(data, outcome_var, unit_var, time_var,
       fake_treat_time = res$fake_treat_time,
       time = res$time,
       gap = res$gap,
+      stringsAsFactors = FALSE
+    )
+
+    # Long format for paths (treated and synthetic)
+    path_df_list[[length(path_df_list) + 1]] <- data.frame(
+      fake_treat_time = res$fake_treat_time,
+      time = res$time,
+      Y_treated = res$Y_treated,
+      Y_synth = res$Y_synth,
       stringsAsFactors = FALSE
     )
 
@@ -461,12 +499,15 @@ in_time_placebo <- function(data, outcome_var, unit_var, time_var,
   }
 
   gap_df <- do.call(rbind, gap_df_list)
+  path_df <- do.call(rbind, path_df_list)
   summary_df <- do.call(rbind, summary_df_list)
   rownames(gap_df) <- NULL
+  rownames(path_df) <- NULL
   rownames(summary_df) <- NULL
 
   return(list(
     gap_df = gap_df,
+    path_df = path_df,
     summary_df = summary_df,
     true_treat_time = true_treat_time,
     treated_unit = treated_unit,
@@ -527,25 +568,177 @@ plot_in_time_placebo <- function(placebo_result, title = "In-Time Placebo Test")
   gap_df <- placebo_result$gap_df
   true_treat_time <- placebo_result$true_treat_time
 
-  # Create factor for fake treatment times for better legend
-  gap_df$fake_treat_time_f <- factor(gap_df$fake_treat_time)
+  # Get the fake treatment time (should be just one now)
+  fake_treat_time <- unique(gap_df$fake_treat_time)[1]
 
-  p <- ggplot(gap_df, aes(x = time, y = gap, color = fake_treat_time_f)) +
-    geom_line(linewidth = 0.8) +
+  p <- ggplot(gap_df, aes(x = time, y = gap)) +
+    geom_line(linewidth = 0.8, color = "steelblue") +
+    # Fake treatment time indicator
+    geom_vline(aes(xintercept = fake_treat_time, linetype = "Fake Treatment"),
+               color = "orange", linewidth = 1) +
     # Real treatment time indicator
-    geom_vline(xintercept = true_treat_time, linetype = "dashed", color = "red", linewidth = 1) +
+    geom_vline(aes(xintercept = true_treat_time, linetype = "Real Treatment"),
+               color = "red", linewidth = 1) +
     # Zero line
     geom_hline(yintercept = 0, color = "black", alpha = 0.3) +
+    # Manual legend for vertical lines
+    scale_linetype_manual(
+      name = "Treatment Times",
+      values = c("Fake Treatment" = "dashed", "Real Treatment" = "solid"),
+      guide = guide_legend(override.aes = list(color = c("orange", "red")))
+    ) +
     labs(
       title = title,
       x = "Time",
       y = "Gap (Treated - Synthetic)",
-      color = "Fake Treatment Time",
       caption = paste0("Unit: ", placebo_result$treated_unit,
-                      " | Red dashed line: True treatment time (", true_treat_time, ")")
+                      " | Fake treatment: ", fake_treat_time,
+                      " | Real treatment: ", true_treat_time)
     ) +
     theme_minimal() +
     theme(legend.position = "bottom")
+
+  return(p)
+}
+
+
+#' Plot in-time placebo test paths (treated vs synthetic)
+#'
+#' @param placebo_result Result from in_time_placebo()
+#' @param title Plot title
+#' @return ggplot object
+plot_in_time_placebo_paths <- function(placebo_result, title = "In-Time Placebo Test: Outcome Paths") {
+
+  path_df <- placebo_result$path_df
+  true_treat_time <- placebo_result$true_treat_time
+
+  # Get the fake treatment time
+  fake_treat_time <- unique(path_df$fake_treat_time)[1]
+
+  # Reshape for plotting
+  path_long <- rbind(
+    data.frame(
+      time = path_df$time,
+      outcome = path_df$Y_treated,
+      type = "Treated",
+      stringsAsFactors = FALSE
+    ),
+    data.frame(
+      time = path_df$time,
+      outcome = path_df$Y_synth,
+      type = "Synthetic",
+      stringsAsFactors = FALSE
+    )
+  )
+
+  p <- ggplot(path_long, aes(x = time, y = outcome, color = type, linetype = type)) +
+    geom_line(linewidth = 0.9) +
+    # Fake treatment time indicator
+    geom_vline(aes(xintercept = fake_treat_time),
+               color = "orange", linetype = "dotted", linewidth = 1) +
+    # Real treatment time indicator
+    geom_vline(aes(xintercept = true_treat_time),
+               color = "red", linetype = "dotted", linewidth = 1) +
+    annotate("text", x = fake_treat_time, y = Inf,
+             label = "Fake Treatment", vjust = 1.5, hjust = 0.5,
+             color = "orange", size = 3.5, fontface = "bold") +
+    annotate("text", x = true_treat_time, y = Inf,
+             label = "Real Treatment", vjust = 3, hjust = 0.5,
+             color = "red", size = 3.5, fontface = "bold") +
+    scale_color_manual(
+      name = "Outcome",
+      values = c("Treated" = "black", "Synthetic" = "steelblue")
+    ) +
+    scale_linetype_manual(
+      name = "Outcome",
+      values = c("Treated" = "solid", "Synthetic" = "dashed")
+    ) +
+    labs(
+      title = title,
+      x = "Time",
+      y = "Outcome",
+      caption = paste0("Unit: ", placebo_result$treated_unit,
+                      " | Fake treatment: ", fake_treat_time,
+                      " | Real treatment: ", true_treat_time)
+    ) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+
+  return(p)
+}
+
+
+#' Plot in-space placebo RMSPE ratio histogram
+#'
+#' @param placebo_result Result from in_space_placebo()
+#' @param title Plot title
+#' @return ggplot object
+plot_in_space_rmspe_histogram <- function(placebo_result, title = "In-Space Placebo: Post/Pre RMSPE Ratios") {
+
+  summary_df <- placebo_result$summary_df
+  treated_unit <- placebo_result$treated_unit
+
+  # Filter out NA ratios
+  rmspe_filtered <- summary_df[!is.na(summary_df$ratio), ]
+
+  if(nrow(rmspe_filtered) == 0) {
+    stop("No valid RMSPE ratios to plot")
+  }
+
+  # Get treated unit result
+  treated_result <- rmspe_filtered[rmspe_filtered$is_real_treated == TRUE, ]
+
+  if(nrow(treated_result) == 0) {
+    stop("Treated unit not found in results")
+  }
+
+  treated_ratio <- treated_result$ratio[1]
+
+  # Calculate rank and p-value
+  rank <- sum(rmspe_filtered$ratio >= treated_ratio, na.rm = TRUE)
+  p_value <- rank / nrow(rmspe_filtered)
+
+  # Determine bin width dynamically
+  max_ratio <- max(rmspe_filtered$ratio, na.rm = TRUE)
+  bin_width <- max(1, ceiling(max_ratio / 20))
+
+  p <- ggplot(rmspe_filtered, aes(x = ratio, fill = is_real_treated)) +
+    geom_histogram(breaks = seq(0, max_ratio + bin_width, by = bin_width),
+                   color = "black", alpha = 0.8) +
+    scale_fill_manual(
+      values = c("FALSE" = "gray70", "TRUE" = "red"),
+      labels = c("FALSE" = "Donor Units", "TRUE" = treated_unit),
+      name = ""
+    ) +
+    geom_vline(xintercept = treated_ratio,
+               color = "red",
+               linetype = "dashed",
+               linewidth = 1) +
+    annotate("text",
+             x = treated_ratio,
+             y = Inf,
+             label = paste0(treated_unit, "\n", round(treated_ratio, 2)),
+             vjust = 1.5,
+             hjust = ifelse(treated_ratio > max_ratio * 0.7, 1.1, -0.1),
+             color = "red",
+             fontface = "bold",
+             size = 3.5) +
+    scale_x_continuous(breaks = seq(0, ceiling(max_ratio), by = max(2, ceiling(max_ratio / 10)))) +
+    labs(
+      x = "Post/Pre RMSPE Ratio",
+      y = "Frequency",
+      title = title,
+      subtitle = paste0(treated_unit, " rank: ", rank, " out of ",
+                        nrow(rmspe_filtered), " units (p = ",
+                        round(p_value, 3), ")")
+    ) +
+    theme_minimal() +
+    theme(
+      panel.grid.minor = element_blank(),
+      axis.text = element_text(size = 11),
+      axis.title = element_text(size = 12),
+      legend.position = "bottom"
+    )
 
   return(p)
 }

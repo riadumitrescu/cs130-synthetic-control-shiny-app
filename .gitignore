@@ -1,0 +1,28 @@
+# Deployment credentials
+deploy.R
+deploy_credentials.R
+rsconnect/
+
+# R files
+.Rhistory
+.RData
+.Rproj.user
+*.Rproj
+
+# Shiny app specific
+*.log
+
+# Data files (if sensitive)
+# Uncomment if you don't want to share your data:
+# *.csv
+# *.xlsx
+# *.xls
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*~
+*.swp
+*.swo
