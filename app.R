@@ -634,17 +634,21 @@ ui <- dashboardPage(
                 
                 br(),
                 fluidRow(
-                  column(4,
-                    actionButton("addPredictor", "Add", 
+                  column(3,
+                    actionButton("addPredictor", "Add",
                                class = "btn-info btn-sm", icon = icon("plus"))
                   ),
-                  column(4,
-                    actionButton("removePredictor", "Remove", 
+                  column(3,
+                    actionButton("removePredictor", "Remove",
                                class = "btn-danger btn-sm", icon = icon("minus"))
                   ),
-                  column(4,
-                    actionButton("clearPredictors", "Clear", 
+                  column(3,
+                    actionButton("clearPredictors", "Clear",
                                class = "btn-warning btn-sm", icon = icon("trash"))
+                  ),
+                  column(3,
+                    actionButton("confirmPredictors", "Confirm",
+                               class = "btn-success btn-sm", icon = icon("check"))
                   )
                 )
               )
@@ -1014,7 +1018,8 @@ server <- function(input, output, session) {
     in_space_placebo_completed = FALSE,
     in_time_placebo_results = NULL,
     in_time_placebo_completed = FALSE,
-    special_predictors = list(),  # List of special predictor configs
+    special_predictors = list(),  # List of confirmed special predictor configs
+    pending_special_predictors = list(),  # List of pending special predictor configs (before confirm)
     predictor_count = 0,          # Counter for predictor IDs
     current_file_name = NULL,     # Current uploaded file name for localStorage
     settings_restored = FALSE,    # Flag to track if settings were restored
@@ -1087,6 +1092,7 @@ server <- function(input, output, session) {
     
     # Reset special predictors when new data is uploaded
     values$special_predictors <- list()
+    values$pending_special_predictors <- list()
     values$predictor_count <- 0
     
     # Try to restore saved settings for this file (use exact file name)
@@ -1178,6 +1184,8 @@ server <- function(input, output, session) {
           }
           if(length(valid_predictors) > 0) {
             values$special_predictors <- valid_predictors
+            # Sync to pending state so UI shows them
+            values$pending_special_predictors <- valid_predictors
           }
         }
         # Clear pending settings after restoration
@@ -1204,7 +1212,7 @@ server <- function(input, output, session) {
         predictorVars = input$predictorVars,
         special_predictors = values$special_predictors
       )
-      
+
       cat("Auto-saving settings for file:", values$current_file_name, "\n")
       cat("Settings:", paste(names(settings_to_save), collapse=", "), "\n")
       
@@ -1235,7 +1243,7 @@ server <- function(input, output, session) {
             predictorVars = input$predictorVars,
             special_predictors = values$special_predictors
           )
-          
+
           cat("Saving settings immediately for file:", values$current_file_name, "\n")
           session$sendCustomMessage("saveSettings", list(
             fileName = values$current_file_name,
@@ -1261,7 +1269,7 @@ server <- function(input, output, session) {
           predictorVars = input$predictorVars,
           special_predictors = values$special_predictors
         )
-        
+
         cat("Saving settings (special predictors changed) for file:", values$current_file_name, "\n")
         session$sendCustomMessage("saveSettings", list(
           fileName = values$current_file_name,
@@ -1270,7 +1278,7 @@ server <- function(input, output, session) {
       })
     }
   }, ignoreInit = TRUE)
-  
+
   # Save settings when predictor vars change
   observeEvent(input$predictorVars, {
     if(!is.null(values$current_file_name) && values$settings_restored && 
@@ -1286,7 +1294,7 @@ server <- function(input, output, session) {
           predictorVars = input$predictorVars,
           special_predictors = values$special_predictors
         )
-        
+
         cat("Saving settings (predictor vars changed) for file:", values$current_file_name, "\n")
         session$sendCustomMessage("saveSettings", list(
           fileName = values$current_file_name,
@@ -1409,6 +1417,8 @@ server <- function(input, output, session) {
       }
       if("special_predictors" %in% names(loaded_config) && !is.null(loaded_config[["special_predictors"]])) {
         values$special_predictors <- loaded_config[["special_predictors"]]
+        # Sync to pending state so UI shows them
+        values$pending_special_predictors <- loaded_config[["special_predictors"]]
       }
 
       showNotification(
@@ -1658,31 +1668,31 @@ server <- function(input, output, session) {
   # Dynamic UI for special predictors
   output$specialPredictorsUI <- renderUI({
     req(values$data, input$timeVar, input$treatmentYear)
-    
+
     # Get available variables (exclude unit and time vars)
     all_vars <- names(values$data)
     predictor_vars <- setdiff(all_vars, c(input$unitVar, input$timeVar))
-    
+
     # Get pre-treatment years for the sliders
     all_years <- sort(unique(values$data[[input$timeVar]]))
     pre_years <- all_years[all_years < input$treatmentYear]
-    
+
     if(length(pre_years) == 0) {
       return(div(class = "alert alert-warning", "No pre-treatment periods available"))
     }
-    
+
     min_year <- min(pre_years)
     max_year <- max(pre_years)
-    
-    # Generate UI for each predictor in the list
-    if(length(values$special_predictors) == 0) {
+
+    # Generate UI for each predictor in the list (use pending state)
+    if(length(values$pending_special_predictors) == 0) {
       return(div(class = "alert alert-info", style = "font-size: 13px;",
-                 icon("info-circle"), 
-                 " No special predictors configured. Click 'Add Predictor' or leave empty to use outcome at each pre-treatment period."))
+                 icon("info-circle"),
+                 " No special predictors configured. Click 'Add' to add a predictor, then 'Confirm' to apply."))
     }
-    
-    predictor_uis <- lapply(seq_along(values$special_predictors), function(i) {
-      pred <- values$special_predictors[[i]]
+
+    predictor_uis <- lapply(seq_along(values$pending_special_predictors), function(i) {
+      pred <- values$pending_special_predictors[[i]]
       
       fluidRow(
         column(4,
@@ -1699,7 +1709,8 @@ server <- function(input, output, session) {
             label = "Start Year",
             value = pred$start,
             min = min_year,
-            max = max_year
+            max = max_year,
+            step = 1
           )
         ),
         column(3,
@@ -1708,7 +1719,8 @@ server <- function(input, output, session) {
             label = "End Year",
             value = pred$end,
             min = min_year,
-            max = max_year
+            max = max_year,
+            step = 1
           )
         ),
         column(2,
@@ -1725,19 +1737,19 @@ server <- function(input, output, session) {
   # Add predictor button
   observeEvent(input$addPredictor, {
     req(values$data, input$timeVar, input$treatmentYear)
-    
+
     # Get defaults
     all_vars <- names(values$data)
     predictor_vars <- setdiff(all_vars, c(input$unitVar, input$timeVar))
-    
+
     all_years <- sort(unique(values$data[[input$timeVar]]))
     pre_years <- all_years[all_years < input$treatmentYear]
-    
+
     if(length(pre_years) == 0 || length(predictor_vars) == 0) return()
-    
+
     values$predictor_count <- values$predictor_count + 1
-    
-    # Add new predictor with defaults
+
+    # Add new predictor with defaults to PENDING state
     new_pred <- list(
       id = values$predictor_count,
       var = predictor_vars[1],
@@ -1745,40 +1757,85 @@ server <- function(input, output, session) {
       end = max(pre_years),
       op = "mean"
     )
-    
-    values$special_predictors <- c(values$special_predictors, list(new_pred))
+
+    values$pending_special_predictors <- c(values$pending_special_predictors, list(new_pred))
   })
-  
+
   # Remove last predictor button
   observeEvent(input$removePredictor, {
-    if(length(values$special_predictors) > 0) {
-      values$special_predictors <- values$special_predictors[-length(values$special_predictors)]
+    if(length(values$pending_special_predictors) > 0) {
+      values$pending_special_predictors <- values$pending_special_predictors[-length(values$pending_special_predictors)]
     }
   })
-  
+
   # Clear all predictors button
   observeEvent(input$clearPredictors, {
-    values$special_predictors <- list()
+    values$pending_special_predictors <- list()
     values$predictor_count <- 0
   })
   
-  # Update special predictors when inputs change
+  # Update PENDING special predictors when inputs change (before confirm)
+  # Create individual observers for each input to ensure reactivity
   observe({
-    req(values$data)
-    
-    if(length(values$special_predictors) > 0) {
-      for(i in seq_along(values$special_predictors)) {
-        var_input <- input[[paste0("pred_var_", i)]]
-        start_input <- input[[paste0("pred_start_", i)]]
-        end_input <- input[[paste0("pred_end_", i)]]
-        
-        if(!is.null(var_input)) values$special_predictors[[i]]$var <- var_input
-        if(!is.null(start_input)) values$special_predictors[[i]]$start <- start_input
-        if(!is.null(end_input)) values$special_predictors[[i]]$end <- end_input
-      }
+    current_predictors <- isolate(values$pending_special_predictors)
+    if(length(current_predictors) == 0) return()
+
+    # Track which inputs exist and read them to establish reactivity
+    for(i in seq_along(current_predictors)) {
+      # Read inputs (not isolated) to make this observer reactive to them
+      var_input <- input[[paste0("pred_var_", i)]]
+      start_input <- input[[paste0("pred_start_", i)]]
+      end_input <- input[[paste0("pred_end_", i)]]
+
+      # Use isolate when updating to prevent loop
+      isolate({
+        if(!is.null(var_input) && var_input != current_predictors[[i]]$var) {
+          values$pending_special_predictors[[i]]$var <- var_input
+        }
+        if(!is.null(start_input)) {
+          start_num <- as.numeric(start_input)
+          if(!is.na(start_num) && start_num != current_predictors[[i]]$start) {
+            values$pending_special_predictors[[i]]$start <- start_num
+          }
+        }
+        if(!is.null(end_input)) {
+          end_num <- as.numeric(end_input)
+          if(!is.na(end_num) && end_num != current_predictors[[i]]$end) {
+            values$pending_special_predictors[[i]]$end <- end_num
+          }
+        }
+      })
     }
   })
-  
+
+  # Confirm button - apply pending special predictors
+  observeEvent(input$confirmPredictors, {
+    # Build a fresh copy from current input values to ensure accuracy
+    confirmed_predictors <- list()
+    if(length(values$pending_special_predictors) > 0) {
+      for(i in seq_along(values$pending_special_predictors)) {
+        # Read current values from inputs
+        var_val <- input[[paste0("pred_var_", i)]]
+        start_val <- input[[paste0("pred_start_", i)]]
+        end_val <- input[[paste0("pred_end_", i)]]
+
+        if(!is.null(var_val) && !is.null(start_val) && !is.null(end_val)) {
+          confirmed_predictors <- c(confirmed_predictors, list(list(
+            id = values$pending_special_predictors[[i]]$id,
+            var = var_val,
+            start = as.numeric(start_val),
+            end = as.numeric(end_val),
+            op = "mean"
+          )))
+        }
+      }
+    }
+
+    # Apply confirmed predictors
+    values$special_predictors <- confirmed_predictors
+    showNotification("Special predictors confirmed and applied!", type = "message", duration = 2)
+  })
+
   # Predictors summary display
   output$predictorsSummary <- renderText({
     lines <- c()
@@ -1795,8 +1852,13 @@ server <- function(input, output, session) {
     if(length(values$special_predictors) > 0) {
       if(length(lines) > 0) lines <- c(lines, "")
       lines <- c(lines, "Special Predictors (custom time windows):")
-      for(pred in values$special_predictors) {
-        lines <- c(lines, paste0("  • ", pred$var, " [", pred$start, "-", pred$end, "] (mean)"))
+      for(i in seq_along(values$special_predictors)) {
+        pred <- values$special_predictors[[i]]
+        if(pred$start == pred$end) {
+          lines <- c(lines, paste0("  • ", pred$var, " [", pred$start, "] (mean)"))
+        } else {
+          lines <- c(lines, paste0("  • ", pred$var, " [", pred$start, "-", pred$end, "] (mean)"))
+        }
       }
     }
     
@@ -1887,6 +1949,16 @@ server <- function(input, output, session) {
       special_predictors_config <- NULL
       if(length(values$special_predictors) > 0) {
         special_predictors_config <- values$special_predictors
+        # Debug output
+        cat("\n=== APP: Special Predictors Config ===\n")
+        cat("Number of special predictors:", length(special_predictors_config), "\n")
+        for(i in seq_along(special_predictors_config)) {
+          sp <- special_predictors_config[[i]]
+          cat(paste0("  [[", i, "]] var='", sp$var, "', start=", sp$start, ", end=", sp$end, ", op='", sp$op, "'\n"))
+        }
+        cat("=====================================\n\n")
+      } else {
+        cat("\n=== APP: No special predictors configured ===\n\n")
       }
 
       # Build optional time period parameters
@@ -1904,6 +1976,13 @@ server <- function(input, output, session) {
       if(!is.na(input$timePlotStart) && !is.na(input$timePlotEnd)) {
         time_plot <- seq(input$timePlotStart, input$timePlotEnd)
       }
+
+      # Debug output for time periods
+      cat("=== APP: Time Period Settings ===\n")
+      cat("time.predictors.prior:", if(is.null(time_predictors_prior)) "NULL (will use default)" else paste(range(time_predictors_prior), collapse="-"), "\n")
+      cat("time.optimize.ssr:", if(is.null(time_optimize_ssr)) "NULL (will use default)" else paste(range(time_optimize_ssr), collapse="-"), "\n")
+      cat("time.plot:", if(is.null(time_plot)) "NULL (will use default)" else paste(range(time_plot), collapse="-"), "\n")
+      cat("==================================\n\n")
 
       # Run analysis using Synth package (dataprep + synth)
       values$analysis_results <- run_synth_analysis(
